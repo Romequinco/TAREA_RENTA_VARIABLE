@@ -1,13 +1,14 @@
 """
 ================================================================================
-data_loader.py - Módulo de Carga de Archivos QTE y STS (VERSIÓN CORREGIDA)
+data_loader.py - Módulo de Carga de Archivos QTE y STS 
 ================================================================================
 
 Correcciones principales:
-1. Separador CSV correcto: punto y coma (;) en lugar de tab
-2. Eliminación de emojis Unicode para compatibilidad Windows
-3. Mejor manejo de errores y encoding
-4. Validación robusta de datos
+1. Separador CSV correcto: punto y coma (;)
+2. Decimal: punto (.) - formato anglosajón estándar 
+3. Eliminación de emojis Unicode para compatibilidad Windows
+4. Mejor manejo de errores y encoding
+5. Validación robusta de datos
 
 ================================================================================
 """
@@ -28,8 +29,7 @@ class DataLoader:
     
     IMPORTANTE: Los archivos CSV tienen:
     - Separador: punto y coma (;)
-    - Decimal: coma (,)
-    - Miles: punto (.)
+    - Decimal: punto (.) - formato anglosajón estándar
     - Encoding: UTF-8 o Latin-1
     """
     
@@ -83,7 +83,7 @@ class DataLoader:
         
         isins_list = sorted(list(isins))
         
-        print(f"[OK] Encontrados {len(isins_list)} ISINs unicos")
+        print(f" Encontrados {len(isins_list)} ISINs unicos")
         if len(isins_list) > 0:
             print(f"  Primeros 5: {isins_list[:5]}")
         
@@ -95,8 +95,7 @@ class DataLoader:
         
         CRÍTICO: 
         - Separador: punto y coma (;)
-        - Decimal: coma (,)
-        - Miles: punto (.)
+        - Decimal: punto (.) - formato estándar anglosajón
         
         Args:
             filepath: Path completo al archivo .csv.gz
@@ -112,9 +111,9 @@ class DataLoader:
                     df = pd.read_csv(
                         filepath, 
                         compression='gzip',
-                        sep=';',  # CORRECCIÓN: separador punto y coma
-                        decimal=',',  # Decimal europeo (coma)
-                        thousands='.',  # Miles europeo (punto)
+                        sep=';',  # Separador: punto y coma
+                        decimal='.',  # CORRECCIÓN: Decimal anglosajón (punto)
+                        # NO especificar 'thousands' - los datos usan formato estándar
                         encoding=encoding,
                         low_memory=False
                     )
@@ -150,6 +149,10 @@ class DataLoader:
             # Precios y cantidades a float
             for col in ['px_bid_0', 'px_ask_0', 'qty_bid_0', 'qty_ask_0']:
                 df[col] = pd.to_numeric(df[col], errors='coerce')
+            
+            # DEBUG: Verificar rango de precios
+            logger.info(f"  Rango de precios BID: {df['px_bid_0'].min():.4f} - {df['px_bid_0'].max():.4f}")
+            logger.info(f"  Rango de precios ASK: {df['px_ask_0'].min():.4f} - {df['px_ask_0'].max():.4f}")
             
             # PASO 5: Limpiar datos
             # Eliminar filas con NaN en columnas críticas
@@ -201,9 +204,9 @@ class DataLoader:
                     df = pd.read_csv(
                         filepath, 
                         compression='gzip',
-                        sep=';',  # CORRECCIÓN: separador punto y coma
-                        decimal=',',
-                        thousands='.',
+                        sep=';',  # Separador: punto y coma
+                        decimal='.',  # Decimal anglosajón (punto)
+                        # NO especificar 'thousands' - los datos usan formato estándar
                         encoding=encoding,
                         low_memory=False
                     )
@@ -261,10 +264,11 @@ class DataLoader:
                         filepath, 
                         compression='gzip', 
                         nrows=5,
-                        sep=';',  # CORRECCIÓN
-                        decimal=',',
-                        thousands='.',
-                        encoding=encoding
+                        sep=';',  # Separador: punto y coma
+                        decimal='.',  # Decimal anglosajón (punto)
+                        # NO especificar 'thousands' - los datos usan formato estándar
+                        encoding=encoding,
+                        low_memory=False
                     )
                     encoding_used = encoding
                     break
