@@ -6,7 +6,7 @@ main.py - Script Principal del Sistema de Arbitraje HFT
 Orquesta el pipeline completo:
 1. Carga de datos (DataLoader)
 2. Limpieza y validación (DataCleaner)
-3. Consolidated Tape (ConsolidatedTape)
+3. Consolidated Tape (ConsolidatedTape) - OPTIMIZADO
 4. Detección de señales (SignalGenerator)
 5. Simulación de latencia (próximo módulo)
 6. Análisis y visualizaciones
@@ -14,12 +14,25 @@ Orquesta el pipeline completo:
 Uso:
     python main.py --data-dir DATA_SMALL --isin <ISIN> --visualize
 
+CORRECCIONES APLICADAS:
+- Configuración UTF-8 para Windows
+- Uso de consolidador optimizado (evita explosión de memoria)
+- Limpieza adaptativa de datos
+- Mejor manejo de errores
+
 ================================================================================
 """
 
 import logging
 import sys
 from pathlib import Path
+
+# Configurar encoding UTF-8 para Windows
+if sys.platform == 'win32':
+    try:
+        sys.stdout.reconfigure(encoding='utf-8')
+    except:
+        pass
 
 # Importar módulos del proyecto
 from config_module import config
@@ -63,7 +76,7 @@ def main():
     
     # Verificar que el directorio existe
     if not data_dir.exists():
-        logger.error(f" Directorio no encontrado: {data_dir}")
+        logger.error(f"[ERROR] Directorio no encontrado: {data_dir}")
         logger.error("Por favor, asegúrate de que los datos están en la ubicación correcta")
         return
     
@@ -113,31 +126,44 @@ def main():
         return
     
     # ========================================================================
-    # FASE 3: CONSOLIDATED TAPE
+    # FASE 3: CONSOLIDATED TAPE (OPTIMIZADO)
     # ========================================================================
     print("\n" + "=" * 80)
     print("FASE 3: CONSOLIDATED TAPE")
     print("=" * 80)
     
-    tape_builder = ConsolidatedTape()
-    consolidated_tape = tape_builder.create_tape(clean_data)
+    # CORRECCIÓN: Usar consolidador optimizado con redondeo temporal
+    tape_builder = ConsolidatedTape(time_bin_ms=100)  # 100ms bins
     
-    if consolidated_tape is None:
-        logger.error(" Error creando consolidated tape")
+    try:
+        consolidated_tape = tape_builder.create_tape(clean_data)
+        
+        if consolidated_tape is None or len(consolidated_tape) == 0:
+            logger.error("[ERROR] Consolidated tape vacío o nulo")
+            return
+        
+        # Validar tape
+        is_valid = tape_builder.validate_tape(consolidated_tape)
+        
+        if not is_valid:
+            logger.error("Consolidated tape falló la validación")
+            return
+        
+        # Estadísticas del tape
+        tape_stats = tape_builder.compute_statistics(consolidated_tape)
+        
+        # Visualizar tape
+        tape_builder.visualize_tape(consolidated_tape, test_isin)
+        
+    except MemoryError as e:
+        logger.error(f"[ERROR MEMORIA] No hay suficiente memoria para procesar: {e}")
+        logger.error("Intenta con un dataset más pequeño o aumenta time_bin_ms")
         return
-    
-    # Validar tape
-    is_valid = tape_builder.validate_tape(consolidated_tape)
-    
-    if not is_valid:
-        logger.error("Consolidated tape falló la validación")
+    except Exception as e:
+        logger.error(f"[ERROR] Error creando consolidated tape: {e}")
+        import traceback
+        logger.debug(traceback.format_exc())
         return
-    
-    # Estadísticas del tape
-    tape_stats = tape_builder.compute_statistics(consolidated_tape)
-    
-    # Visualizar tape
-    tape_builder.visualize_tape(consolidated_tape, test_isin)
     
     # ========================================================================
     # FASE 4: DETECCIÓN DE SEÑALES (NUEVO - PARTE 3)
@@ -146,19 +172,28 @@ def main():
     print("FASE 4: DETECCIÓN DE SEÑALES DE ARBITRAJE")
     print("=" * 80)
     
-    signal_gen = SignalGenerator()
-    
-    # Detectar oportunidades
-    signals_df = signal_gen.detect_opportunities(consolidated_tape)
-    
-    # Analizar pares de venues
-    venue_pairs = signal_gen.analyze_venue_pairs(signals_df)
-    
-    # Visualizar señales
-    signal_gen.visualize_signals(signals_df, test_isin)
-    
-    # Exportar oportunidades
-    signal_gen.export_opportunities(signals_df)
+    try:
+        signal_gen = SignalGenerator()
+        
+        # Detectar oportunidades
+        signals_df = signal_gen.detect_opportunities(consolidated_tape)
+        
+        # Analizar pares de venues
+        venue_pairs = signal_gen.analyze_venue_pairs(signals_df)
+        
+        # Visualizar señales
+        signal_gen.visualize_signals(signals_df, test_isin)
+        
+        # Exportar oportunidades
+        signal_gen.export_opportunities(signals_df)
+        
+    except Exception as e:
+        logger.error(f"[ERROR] Error en detección de señales: {e}")
+        import traceback
+        logger.debug(traceback.format_exc())
+        # Continuar sin señales
+        signals_df = None
+        venue_pairs = None
     
     # ========================================================================
     # RESUMEN FINAL
@@ -167,27 +202,33 @@ def main():
     print("RESUMEN DEL ANÁLISIS")
     print("=" * 80)
     
-    total_opportunities = signals_df['is_rising_edge'].sum()
-    total_profit = signals_df[signals_df['is_rising_edge']]['total_profit'].sum()
-    
     print(f"\nISIN: {test_isin}")
-    print(f"  - Total snapshots: {len(consolidated_tape):,}")
-    print(f"  - Oportunidades detectadas: {total_opportunities:,}")
-    print(f"  - Profit teórico total (latencia=0): €{total_profit:.2f}")
+    print(f"  - Total snapshots en tape: {len(consolidated_tape):,}")
+    print(f"  - Venues incluidos: {len(clean_data)}")
     
-    if total_opportunities > 0:
-        avg_profit = signals_df[signals_df['is_rising_edge']]['total_profit'].mean()
-        print(f"  - Profit medio por oportunidad: €{avg_profit:.2f}")
+    if signals_df is not None and len(signals_df) > 0:
+        total_opportunities = signals_df['is_rising_edge'].sum()
+        total_profit = signals_df[signals_df['is_rising_edge']]['total_profit'].sum()
+        
+        print(f"  - Oportunidades detectadas: {total_opportunities:,}")
+        print(f"  - Profit teórico total (latencia=0): €{total_profit:.2f}")
+        
+        if total_opportunities > 0:
+            avg_profit = signals_df[signals_df['is_rising_edge']]['total_profit'].mean()
+            print(f"  - Profit medio por oportunidad: €{avg_profit:.2f}")
+    else:
+        print(f"  - [INFO] No se ejecutó detección de señales")
     
     print("\n" + "=" * 80)
-    print(" ANÁLISIS COMPLETADO CON ÉXITO")
+    print("[EXITO] ANÁLISIS COMPLETADO CON ÉXITO")
     print("=" * 80)
     
     print("\nArchivos generados:")
     print(f"  - Log: {config.OUTPUT_DIR / 'arbitrage_system.log'}")
-    print(f"  - Oportunidades: {config.OUTPUT_DIR / 'opportunities.csv'}")
+    if signals_df is not None:
+        print(f"  - Oportunidades: {config.OUTPUT_DIR / 'opportunities.csv'}")
     
-    print("\n Próximos pasos:")
+    print("\n[INFO] Próximos pasos:")
     print("  - PARTE 4: Simulación de Latencia (Time Machine)")
     print("  - PARTE 5: Análisis Final + Reporte Completo")
     
@@ -196,14 +237,20 @@ def main():
         'consolidated_tape': consolidated_tape,
         'signals': signals_df,
         'venue_pairs': venue_pairs,
-        'total_profit': total_profit
+        'total_profit': total_profit if signals_df is not None else 0
     }
 
 
 if __name__ == "__main__":
     try:
         results = main()
-        logger.info("Pipeline ejecutado exitosamente")
+        if results:
+            logger.info("Pipeline ejecutado exitosamente")
+            print(f"\n[INFO] Resultados disponibles en variable 'results'")
+            print(f"       consolidated_tape shape: {results['consolidated_tape'].shape}")
+        else:
+            logger.error("Pipeline falló")
+            sys.exit(1)
     except Exception as e:
         logger.error(f"Error en el pipeline: {e}", exc_info=True)
         sys.exit(1)

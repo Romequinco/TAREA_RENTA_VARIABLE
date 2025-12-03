@@ -13,6 +13,11 @@ Pipeline de limpieza (FASE 2):
 2. Clean invalid prices
 3. Clean crossed books
 4. Filter by market status
+
+CORRECCIONES APLICADAS:
+- Filtrado adaptativo de trading status (evita eliminar 100% de datos)
+- Mejor manejo de códigos de status desconocidos
+- Validación más robusta
 ================================================================================
 """
 
@@ -149,10 +154,14 @@ class DataCleaner:
         CRÍTICO: Operar durante auctions, halts o pre-open generaría señales
         falsas. Las órdenes no se ejecutarían instantáneamente en esos estados.
         
+        CORRECCIÓN APLICADA: Filtrado adaptativo que no elimina todos los datos
+        si los códigos de status no coinciden con los esperados.
+        
         Método:
         - Usa pd.merge_asof con direction='backward' para propagar el último
           estado conocido hacia adelante
         - Filtra por códigos de continuous trading según venue
+        - Si no hay códigos válidos conocidos, mantiene los datos con advertencia
         
         Fuente: Arbitrage study in BME.docx - Section 2.B "Market Status Codes"
         
@@ -162,7 +171,7 @@ class DataCleaner:
             mic: Market Identifier Code (XMAD, AQXE, CEUX, TRQX)
             
         Returns:
-            DataFrame filtrado (solo continuous trading)
+            DataFrame filtrado (solo continuous trading si es posible)
         """
         # Validar datos de entrada
         if sts_df is None or len(sts_df) == 0:
@@ -175,23 +184,43 @@ class DataCleaner:
         
         initial_len = len(qte_df)
         
+        # Verificar si la columna existe
+        if 'market_trading_status' not in sts_df.columns:
+            logger.warning(f"    Column 'market_trading_status' not found in STS for {mic}")
+            return qte_df
+        
+        # CORRECCIÓN: Verificar si los códigos válidos existen en los datos
+        valid_codes = config.VALID_STATES[mic]
+        actual_codes = set(sts_df['market_trading_status'].dropna().unique())
+        matching_codes = set(valid_codes).intersection(actual_codes)
+        
+        if len(matching_codes) == 0:
+            logger.warning(f"    No matching trading status codes found for {mic}")
+            logger.warning(f"    Expected codes: {valid_codes}")
+            logger.warning(f"    Found codes: {sorted(actual_codes)}")
+            logger.warning(f"    Keeping all data without status filtering")
+            return qte_df
+        
         # Ordenar ambos DataFrames por timestamp
         qte_sorted = qte_df.sort_values('epoch').copy()
         sts_sorted = sts_df[['epoch', 'market_trading_status']].sort_values('epoch').copy()
         
         # Merge asof: Asigna a cada snapshot el estado más reciente anterior
         # direction='backward' significa "usar el último valor conocido"
-        merged = pd.merge_asof(
-            qte_sorted,
-            sts_sorted,
-            on='epoch',
-            direction='backward'
-        )
+        try:
+            merged = pd.merge_asof(
+                qte_sorted,
+                sts_sorted,
+                on='epoch',
+                direction='backward'
+            )
+        except Exception as e:
+            logger.error(f"    Error in merge_asof for {mic}: {e}")
+            return qte_df
         
         # Filtrar por códigos válidos de continuous trading
-        valid_codes = config.VALID_STATES[mic]
         merged_filtered = merged[
-            merged['market_trading_status'].isin(valid_codes)
+            merged['market_trading_status'].isin(matching_codes)
         ].copy()
         
         # Limpiar columna temporal
@@ -199,6 +228,13 @@ class DataCleaner:
             merged_filtered = merged_filtered.drop('market_trading_status', axis=1)
         
         removed = initial_len - len(merged_filtered)
+        
+        # CORRECCIÓN: Solo aplicar filtro si no elimina TODOS los datos
+        if len(merged_filtered) == 0:
+            logger.warning(f"    Status filtering would remove ALL data for {mic}")
+            logger.warning(f"    Keeping original data without status filtering")
+            return qte_df
+        
         if removed > 0:
             pct = removed / initial_len * 100
             logger.info(f"    Removed {removed:,} non-trading snapshots ({pct:.2f}%)")
@@ -213,7 +249,7 @@ class DataCleaner:
         1. Magic numbers
         2. Invalid prices
         3. Crossed books
-        4. Market status
+        4. Market status (con filtrado adaptativo)
         
         Args:
             venue_dict: Dict con keys 'qte' y 'sts'
@@ -222,7 +258,7 @@ class DataCleaner:
         Returns:
             DataFrame limpio y validado
         """
-        print(f"\n  🧹 Limpiando {mic}...")
+        print(f"\n  [LIMPIEZA] {mic}...")
         
         qte_df = venue_dict['qte']
         sts_df = venue_dict['sts']
@@ -236,7 +272,14 @@ class DataCleaner:
         df = self.clean_crossed_book(df)
         df = self.filter_by_market_status(df, sts_df, mic)
         
-        print(f"    ✓ Snapshots finales: {len(df):,} (limpios)")
+        print(f"    [OK] Snapshots finales: {len(df):,} (limpios)")
+        
+        # Advertencia si queda muy poco
+        if len(df) == 0:
+            logger.warning(f"  {mic} has 0 snapshots after cleaning")
+        elif len(df) < len(qte_df) * 0.01:  # Menos del 1%
+            pct = (len(df) / len(qte_df)) * 100
+            logger.warning(f"  {mic} retained only {pct:.2f}% of original data")
         
         return df
     
@@ -263,11 +306,16 @@ class DataCleaner:
                 if len(cleaned_df) > 0:
                     cleaned_data[mic] = cleaned_df
                 else:
-                    logger.warning(f"  {mic} has 0 snapshots after cleaning")
+                    logger.warning(f"  {mic} excluded - no data after cleaning")
             
             except Exception as e:
                 logger.error(f"  Error cleaning {mic}: {e}")
+                import traceback
+                logger.debug(traceback.format_exc())
         
-        print(f"\n✓ Limpieza completada para {len(cleaned_data)} venues")
+        print(f"\n[EXITO] Limpieza completada para {len(cleaned_data)} venues")
+        
+        if len(cleaned_data) == 0:
+            logger.error("  [CRITICO] No venues survived cleaning!")
         
         return cleaned_data

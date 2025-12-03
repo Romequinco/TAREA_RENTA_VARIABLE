@@ -1,11 +1,16 @@
 """
 ================================================================================
-consolidator.py - Módulo de Consolidated Tape
+consolidator.py - Módulo de Consolidated Tape (VERSIÓN OPTIMIZADA)
 ================================================================================
 Responsabilidades:
 - Merge de datos multi-venue en un único DataFrame
 - Forward fill para propagar últimos precios conocidos
 - Validación del tape consolidado
+
+OPTIMIZACIONES APLICADAS:
+- Redondeo temporal a bins para alinear timestamps (evita explosión de memoria)
+- merge_asof en lugar de outer merge (O(n) vs O(n²))
+- Procesamiento eficiente para datasets grandes
 
 Estructura del Consolidated Tape:
     epoch | XMAD_bid | XMAD_ask | XMAD_bid_qty | XMAD_ask_qty |
@@ -33,17 +38,84 @@ class ConsolidatedTape:
     
     El tape consolidado permite comparar precios de todos los venues en
     el mismo instante temporal, que es esencial para detectar arbitraje.
+    
+    OPTIMIZACIÓN: Usa redondeo temporal y merge_asof para evitar explosión
+    de memoria en datasets grandes.
     """
     
-    @staticmethod
-    def create_tape(venue_data: Dict[str, pd.DataFrame]) -> pd.DataFrame:
+    def __init__(self, time_bin_ms: int = 100):
         """
-        Merge de todos los venues en un único DataFrame.
+        Args:
+            time_bin_ms: Ventana de redondeo temporal en milisegundos (default: 100ms)
+        """
+        self.time_bin_ms = time_bin_ms
+        self.time_bin_ns = time_bin_ms * 1_000_000  # Convertir a nanosegundos
+        logger.info(f"ConsolidatedTape initialized: time_bin={time_bin_ms}ms")
+    
+    def _round_timestamps(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Redondea timestamps a bins temporales para facilitar el merge.
+        
+        CRÍTICO: Esto evita la explosión combinatoria del outer merge.
+        
+        Args:
+            df: DataFrame con columna 'epoch'
+            
+        Returns:
+            DataFrame con 'epoch' redondeado
+        """
+        df = df.copy()
+        df['epoch'] = (df['epoch'] // self.time_bin_ns) * self.time_bin_ns
+        return df
+    
+    def _prepare_venue_data(self, df: pd.DataFrame, venue_name: str) -> pd.DataFrame:
+        """
+        Prepara datos de un venue para consolidación.
+        
+        Args:
+            df: DataFrame con datos del venue
+            venue_name: Nombre del venue (e.g., 'XMAD')
+            
+        Returns:
+            DataFrame preparado con columnas renombradas
+        """
+        # Redondear timestamps
+        df = self._round_timestamps(df)
+        
+        # Ordenar por timestamp (crítico para merge_asof)
+        df = df.sort_values('epoch').reset_index(drop=True)
+        
+        # Renombrar columnas con prefijo del venue
+        rename_map = {
+            'px_bid_0': f'{venue_name}_bid',
+            'px_ask_0': f'{venue_name}_ask',
+            'qty_bid_0': f'{venue_name}_bid_qty',
+            'qty_ask_0': f'{venue_name}_ask_qty'
+        }
+        
+        df = df.rename(columns=rename_map)
+        
+        # Seleccionar solo columnas necesarias
+        cols_to_keep = ['epoch'] + list(rename_map.values())
+        available_cols = [c for c in cols_to_keep if c in df.columns]
+        df = df[available_cols]
+        
+        # Eliminar duplicados en el mismo timestamp (tomar último)
+        df = df.drop_duplicates(subset=['epoch'], keep='last')
+        
+        return df
+    
+    def create_tape(self, venue_data: Dict[str, pd.DataFrame]) -> pd.DataFrame:
+        """
+        Merge de todos los venues en un único DataFrame usando estrategia optimizada.
+        
+        OPTIMIZACIÓN CLAVE: En lugar de outer merge (que genera producto cartesiano),
+        usa merge_asof incremental con redondeo temporal.
         
         Proceso:
-        1. Para cada venue, renombrar columnas con prefijo del MIC
-        2. Outer join iterativo por 'epoch' (timestamp)
-        3. Ordenar por timestamp
+        1. Redondear timestamps a bins (100ms por defecto)
+        2. Preparar cada venue con renombrado de columnas
+        3. merge_asof incremental (empieza con venue más líquido)
         4. Forward fill para propagar últimos precios conocidos
         5. Eliminar filas iniciales con NaNs
         
@@ -68,52 +140,69 @@ class ConsolidatedTape:
             logger.error("  No venue data to consolidate")
             return None
         
-        print(f"  Venues a consolidar: {list(venue_data.keys())}")
+        venue_names = list(venue_data.keys())
+        print(f"  Venues a consolidar: {venue_names}")
         
         # ====================================================================
-        # PASO 1: Preparar DataFrames individuales con renombrado
+        # PASO 1: Preparar DataFrames individuales
         # ====================================================================
-        dfs = []
+        prepared_venues = {}
         
         for mic, df in venue_data.items():
-            # Seleccionar columnas relevantes
-            df_subset = df[['epoch', 'px_bid_0', 'px_ask_0', 
-                           'qty_bid_0', 'qty_ask_0']].copy()
+            if len(df) == 0:
+                logger.warning(f"  [SKIP] {mic} no tiene datos")
+                continue
             
-            # Renombrar con prefijo del venue
-            df_subset.columns = [
-                'epoch',
-                f'{mic}_bid',
-                f'{mic}_ask',
-                f'{mic}_bid_qty',
-                f'{mic}_ask_qty'
-            ]
-            
-            dfs.append(df_subset)
-            print(f"   {mic}: {len(df_subset):,} snapshots preparados")
+            prepared = self._prepare_venue_data(df, mic)
+            prepared_venues[mic] = prepared
+            print(f"   {mic}: {len(prepared):,} snapshots preparados")
+        
+        if len(prepared_venues) == 0:
+            logger.error("  No hay venues preparados para consolidar")
+            return None
         
         # ====================================================================
-        # PASO 2: Merge iterativo con outer join
+        # PASO 2: Estrategia de merge eficiente
         # ====================================================================
-        print("\n  Ejecutando outer merge...")
+        # Ordenar venues por cantidad de datos (más líquido primero)
+        sorted_venues = sorted(
+            prepared_venues.items(), 
+            key=lambda x: len(x[1]), 
+            reverse=True
+        )
         
-        consolidated = dfs[0]
+        # Venue base (el más líquido)
+        base_venue_name, consolidated = sorted_venues[0]
+        print(f"\n  Usando {base_venue_name} como base ({len(consolidated):,} rows)")
         
-        for i, df in enumerate(dfs[1:], 1):
-            consolidated = pd.merge(
-                consolidated,
-                df,
-                on='epoch',
-                how='outer'  # Mantener todos los timestamps de todos los venues
-            )
-            print(f"    Merge {i}/{len(dfs)-1} completado")
+        # merge_asof incremental con los demás venues
+        print(f"\n  Ejecutando merge_asof incremental...")
+        
+        for venue_name, venue_df in sorted_venues[1:]:
+            print(f"    Merging con {venue_name}... ", end='')
+            
+            try:
+                # merge_asof: busca el timestamp más cercano
+                consolidated = pd.merge_asof(
+                    consolidated,
+                    venue_df,
+                    on='epoch',
+                    direction='nearest',  # Buscar timestamp más cercano
+                    tolerance=self.time_bin_ns  # Tolerancia de redondeo
+                )
+                print(f"OK ({len(consolidated):,} rows)")
+                
+            except Exception as e:
+                logger.error(f"Error merging {venue_name}: {e}")
+                print(f"ERROR")
+                continue
         
         # ====================================================================
         # PASO 3: Ordenar por timestamp
         # ====================================================================
         consolidated = consolidated.sort_values('epoch').reset_index(drop=True)
         
-        print(f"\n  ✓ Tape consolidado creado: {consolidated.shape}")
+        print(f"\n  [OK] Tape consolidado creado: {consolidated.shape}")
         print(f"    - Timestamps únicos: {len(consolidated):,}")
         print(f"    - Columnas totales: {len(consolidated.columns)}")
         print(f"    - Rango temporal: {consolidated['epoch'].min()} to {consolidated['epoch'].max()}")
@@ -121,13 +210,13 @@ class ConsolidatedTape:
         # ====================================================================
         # PASO 4: Forward fill para propagar últimos precios
         # ====================================================================
-        print("\n  Aplicando forward fill...")
+        print(f"\n  Aplicando forward fill...")
         
         nans_before = consolidated.isna().sum().sum()
         print(f"    NaNs antes: {nans_before:,}")
         
         # Forward fill: Propagar último valor conocido hacia adelante
-        consolidated = consolidated.fillna(method='ffill')
+        consolidated = consolidated.ffill()
         
         nans_after = consolidated.isna().sum().sum()
         print(f"    NaNs después: {nans_after:,}")
@@ -148,6 +237,19 @@ class ConsolidatedTape:
                 consolidated = consolidated.iloc[first_complete_row:].reset_index(drop=True)
         
         print(f"\n  Tape final: {consolidated.shape}")
+        
+        # ====================================================================
+        # PASO 6: Estadísticas de cobertura
+        # ====================================================================
+        print(f"\n  [ESTADISTICAS DE COBERTURA]")
+        for venue_name in prepared_venues.keys():
+            bid_col = f'{venue_name}_bid'
+            ask_col = f'{venue_name}_ask'
+            
+            if bid_col in consolidated.columns and ask_col in consolidated.columns:
+                valid_rows = consolidated[[bid_col, ask_col]].notna().all(axis=1).sum()
+                coverage = (valid_rows / len(consolidated)) * 100
+                print(f"    {venue_name}: {valid_rows:,} rows válidas ({coverage:.1f}% cobertura)")
         
         return consolidated
     
@@ -179,15 +281,15 @@ class ConsolidatedTape:
         if nan_count > 0:
             logger.error(f"  Found {nan_count:,} NaNs in consolidated tape")
             return False
-        print("  ✓ No NaNs encontrados")
+        print("  [OK] No NaNs encontrados")
         
         # ====================================================================
         # Validación 2: Timestamps monotónicos
         # ====================================================================
         if not df['epoch'].is_monotonic_increasing:
-            logger.error(" Timestamps are not monotonically increasing")
+            logger.error("  [ERROR] Timestamps are not monotonically increasing")
             return False
-        print("  ✓ Timestamps monotónicamente crecientes")
+        print("  [OK] Timestamps monotónicamente crecientes")
         
         # ====================================================================
         # Validación 3: No negative spreads dentro de cada venue
@@ -203,11 +305,11 @@ class ConsolidatedTape:
                 
                 if (spread < 0).any():
                     venue = bid_col.replace('_bid', '')
-                    logger.error(f"  Negative spread found in {venue}")
+                    logger.error(f"  [ERROR] Negative spread found in {venue}")
                     all_spreads_valid = False
         
         if all_spreads_valid:
-            print("  No negative spreads dentro de venues")
+            print("  [OK] No negative spreads dentro de venues")
         else:
             return False
         
@@ -215,14 +317,17 @@ class ConsolidatedTape:
         # Validación 4: No precios excesivos
         # ====================================================================
         price_cols = [col for col in df.columns if 'bid' in col or 'ask' in col]
-        max_price = df[price_cols].max().max()
+        price_cols = [c for c in price_cols if not c.endswith('_qty')]
         
-        if max_price > config.MAX_REASONABLE_PRICE:
-            logger.warning(f"  Precio sospechosamente alto: €{max_price:.2f}")
-        else:
-            print(f"  Precios razonables (max: €{max_price:.2f})")
+        if len(price_cols) > 0:
+            max_price = df[price_cols].max().max()
+            
+            if max_price > config.MAX_REASONABLE_PRICE:
+                logger.warning(f"  [ADVERTENCIA] Precio sospechosamente alto: €{max_price:.2f}")
+            else:
+                print(f"  [OK] Precios razonables (max: €{max_price:.2f})")
         
-        print("\n  VALIDACIÓN EXITOSA")
+        print("\n  [EXITO] VALIDACIÓN EXITOSA")
         return True
     
     @staticmethod
@@ -341,6 +446,6 @@ class ConsolidatedTape:
         ax2.grid(True, alpha=0.3)
         
         plt.tight_layout()
-        plt.show()
-        
-        print("  Visualizaciones generadas")
+        plt.savefig(config.FIGURES_DIR / f'consolidated_tape_{isin}.png', dpi=150)
+        print(f"  Visualización guardada en: {config.FIGURES_DIR / f'consolidated_tape_{isin}.png'}")
+        plt.close()
