@@ -13,11 +13,6 @@ Pipeline de limpieza (FASE 2):
 2. Clean invalid prices
 3. Clean crossed books
 4. Filter by market status
-
-CORRECCIONES APLICADAS:
-- Filtrado adaptativo de trading status (evita eliminar 100% de datos)
-- Mejor manejo de códigos de status desconocidos
-- Validación más robusta
 ================================================================================
 """
 
@@ -153,9 +148,6 @@ class DataCleaner:
         
         CRÍTICO: Operar durante auctions, halts o pre-open generaría señales
         falsas. Las órdenes no se ejecutarían instantáneamente en esos estados.
-        
-        CORRECCIÓN APLICADA: Filtrado adaptativo que no elimina todos los datos
-        si los códigos de status no coinciden con los esperados.
         
         Método:
         - Usa pd.merge_asof con direction='backward' para propagar el último
