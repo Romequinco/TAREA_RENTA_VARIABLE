@@ -9,6 +9,7 @@ Responsabilidades:
 - Calcular profit teórico por oportunidad
 - Implementar Rising Edge Detection (evitar doble conteo)
 - Identificar venues involucrados en cada oportunidad
+- NUEVO: Gráficos corregidos y funcionales
 
 Condición de Arbitraje:
     Global_Max_Bid > Global_Min_Ask
@@ -20,9 +21,6 @@ Rising Edge:
     Si una oportunidad persiste por N snapshots, solo contarla la primera vez
     que aparece (rising edge). Si desaparece y reaparece, es nueva oportunidad.
 
-Basado en: 
-- Arbitrage study in BME.docx - Step 3 "Signal Generation"
-- arbitrage_architecture.md - Documento 2 (próximo)
 ================================================================================
 """
 
@@ -42,7 +40,7 @@ class SignalGenerator:
     """
     Detecta oportunidades de arbitraje en el consolidated tape.
     
-    El sistema busca instantess donde se puede comprar en un venue y
+    El sistema busca instantes donde se puede comprar en un venue y
     vender en otro simultáneamente con profit positivo.
     """
     
@@ -289,6 +287,8 @@ class SignalGenerator:
         """
         Visualiza las señales de arbitraje detectadas.
         
+        NUEVO: Gráficos corregidos y funcionales
+        
         Args:
             signals_df: DataFrame con señales
             isin: ISIN para el título
@@ -298,28 +298,38 @@ class SignalGenerator:
         
         # Sampling
         if len(signals_df) > max_points:
-            sample_df = signals_df.sample(n=max_points, random_state=42).sort_index()
+            # Tomar muestra aleatoria pero mantener índices originales
+            sample_indices = np.sort(np.random.choice(signals_df.index, size=max_points, replace=False))
+            sample_df = signals_df.loc[sample_indices].copy()
         else:
-            sample_df = signals_df
+            sample_df = signals_df.copy()
         
         # Crear figura con subplots
         fig, axes = plt.subplots(3, 1, figsize=(15, 12))
+        
+        # Crear índice numérico para plotting
+        x_values = range(len(sample_df))
         
         # ====================================================================
         # Plot 1: Global Max Bid vs Global Min Ask
         # ====================================================================
         ax1 = axes[0]
         
-        ax1.plot(range(len(sample_df)), sample_df['global_max_bid'], 
-                label='Global Max Bid', color='green', alpha=0.7)
-        ax1.plot(range(len(sample_df)), sample_df['global_min_ask'], 
-                label='Global Min Ask', color='red', alpha=0.7)
+        # Plotear precios
+        ax1.plot(x_values, sample_df['global_max_bid'].values, 
+                label='Global Max Bid', color='green', alpha=0.7, linewidth=1.5)
+        ax1.plot(x_values, sample_df['global_min_ask'].values, 
+                label='Global Min Ask', color='red', alpha=0.7, linewidth=1.5)
         
         # Marcar oportunidades
-        opportunities = sample_df[sample_df['is_opportunity']]
-        if len(opportunities) > 0:
-            ax1.scatter(opportunities.index, opportunities['global_max_bid'],
-                       color='gold', s=10, alpha=0.5, label='Arbitrage Opportunity')
+        opportunities_mask = sample_df['is_opportunity']
+        if opportunities_mask.any():
+            opp_indices = [i for i, v in enumerate(opportunities_mask) if v]
+            opp_bids = sample_df.loc[opportunities_mask, 'global_max_bid'].values
+            
+            ax1.scatter(opp_indices, opp_bids,
+                       color='gold', s=30, alpha=0.6, label='Arbitrage Opportunity',
+                       zorder=5)
         
         ax1.set_title(f'Global Best Prices - ISIN: {isin}', 
                      fontsize=14, fontweight='bold')
@@ -334,11 +344,14 @@ class SignalGenerator:
         ax2 = axes[1]
         
         # Solo plotear cuando hay oportunidad
-        profit_data = sample_df[sample_df['is_opportunity']]['theoretical_profit']
+        profit_mask = sample_df['is_opportunity'] & (sample_df['theoretical_profit'] > 0)
         
-        if len(profit_data) > 0:
-            ax2.scatter(profit_data.index, profit_data * 10000,  # En basis points
-                       color='blue', alpha=0.5, s=20)
+        if profit_mask.any():
+            profit_indices = [i for i, v in enumerate(profit_mask) if v]
+            profit_values = sample_df.loc[profit_mask, 'theoretical_profit'].values * 10000  # En basis points
+            
+            ax2.scatter(profit_indices, profit_values,
+                       color='blue', alpha=0.6, s=30)
             ax2.set_title('Theoretical Profit per Unit (basis points)', 
                          fontsize=14, fontweight='bold')
             ax2.set_xlabel('Snapshot Index')
@@ -346,7 +359,10 @@ class SignalGenerator:
             ax2.grid(True, alpha=0.3)
         else:
             ax2.text(0.5, 0.5, 'No opportunities detected', 
-                    ha='center', va='center', fontsize=14)
+                    ha='center', va='center', fontsize=14,
+                    transform=ax2.transAxes)
+            ax2.set_xlabel('Snapshot Index')
+            ax2.set_ylabel('Profit (bps)')
         
         # ====================================================================
         # Plot 3: Cumulative Profit (Rising Edges only)
@@ -356,13 +372,15 @@ class SignalGenerator:
         rising_edges = signals_df[signals_df['is_rising_edge']].copy()
         
         if len(rising_edges) > 0:
+            # Ordenar por índice para cumsum correcto
             rising_edges = rising_edges.sort_index()
-            rising_edges['cumulative_profit'] = rising_edges['total_profit'].cumsum()
+            cumulative_profit = rising_edges['total_profit'].cumsum().values
             
-            ax3.plot(range(len(rising_edges)), rising_edges['cumulative_profit'],
+            x_cum = range(len(rising_edges))
+            
+            ax3.plot(x_cum, cumulative_profit,
                     color='darkgreen', linewidth=2)
-            ax3.fill_between(range(len(rising_edges)), 
-                            rising_edges['cumulative_profit'],
+            ax3.fill_between(x_cum, cumulative_profit,
                             alpha=0.3, color='green')
             ax3.set_title('Cumulative Theoretical Profit (€)', 
                          fontsize=14, fontweight='bold')
@@ -371,10 +389,21 @@ class SignalGenerator:
             ax3.grid(True, alpha=0.3)
         else:
             ax3.text(0.5, 0.5, 'No rising edges detected', 
-                    ha='center', va='center', fontsize=14)
+                    ha='center', va='center', fontsize=14,
+                    transform=ax3.transAxes)
+            ax3.set_xlabel('Opportunity Number')
+            ax3.set_ylabel('Cumulative Profit (€)')
         
         plt.tight_layout()
-        plt.show()
+        
+        # Guardar y mostrar
+        output_path = config.FIGURES_DIR / f'signals_{isin}.png'
+        plt.savefig(output_path, dpi=150, bbox_inches='tight')
+        print(f"  Visualización guardada en: {output_path}")
+        
+        plt.show(block=False)
+        plt.pause(0.1)
+        plt.close()
         
         print("  Visualizaciones generadas")
     

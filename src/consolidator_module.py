@@ -1,11 +1,13 @@
 """
 ================================================================================
-consolidator.py - Módulo de Consolidated Tape (VERSIÓN OPTIMIZADA)
+consolidator.py - Módulo de Consolidated Tape (VERSIÓN OPTIMIZADA + PREVIEW)
 ================================================================================
 Responsabilidades:
 - Merge de datos multi-venue en un único DataFrame
 - Forward fill para propagar últimos precios conocidos
 - Validación del tape consolidado
+- NUEVO: Preview visual del tape consolidado
+- NUEVO: Gráficos corregidos y funcionales
 
 OPTIMIZACIONES APLICADAS:
 - Redondeo temporal a bins para alinear timestamps (evita explosión de memoria)
@@ -118,8 +120,10 @@ class ConsolidatedTape:
         3. merge_asof incremental (empieza con venue más líquido)
         4. Forward fill para propagar últimos precios conocidos
         5. Eliminar filas iniciales con NaNs
+        6. NUEVO: Mostrar preview del tape
         
-        Forward Fill Rationale:
+         Forward Fill Rationale:
+
         En market microstructure, se asume que el último precio conocido
         sigue vigente hasta que llegue un nuevo update. Esto es estándar
         y refleja la realidad del mercado.
@@ -237,6 +241,33 @@ class ConsolidatedTape:
                 consolidated = consolidated.iloc[first_complete_row:].reset_index(drop=True)
         
         print(f"\n  Tape final: {consolidated.shape}")
+        
+        # ====================================================================
+        # NUEVO: MOSTRAR PREVIEW DEL TAPE
+        # ====================================================================
+        print(f"\n  [PREVIEW DEL CONSOLIDATED TAPE]")
+        print("  " + "=" * 76)
+        print(f"  Primeras 10 filas del tape consolidado:")
+        print()
+        
+        # Seleccionar columnas principales para mostrar
+        display_cols = ['epoch'] + [col for col in consolidated.columns if col != 'epoch'][:8]
+        preview_df = consolidated[display_cols].head(10)
+        
+        # Formatear epoch como timestamp legible
+        preview_display = preview_df.copy()
+        preview_display['epoch'] = pd.to_datetime(preview_display['epoch'], unit='ns').dt.strftime('%H:%M:%S.%f')
+        
+        # Formatear precios a 4 decimales
+        for col in preview_display.columns:
+            if 'bid' in col or 'ask' in col:
+                if not col.endswith('_qty'):
+                    preview_display[col] = preview_display[col].map(lambda x: f'{x:.4f}' if pd.notna(x) else 'NaN')
+            elif 'qty' in col:
+                preview_display[col] = preview_display[col].map(lambda x: f'{int(x):,}' if pd.notna(x) else 'NaN')
+        
+        print(preview_display.to_string(index=False))
+        print()
         
         # ====================================================================
         # PASO 6: Estadísticas de cobertura
@@ -385,6 +416,8 @@ class ConsolidatedTape:
         """
         Genera visualizaciones del consolidated tape.
         
+        NUEVO: Gráficos corregidos y funcionales
+        
         Args:
             df: Consolidated tape
             isin: ISIN para el título
@@ -397,7 +430,7 @@ class ConsolidatedTape:
             sample_df = df.sample(n=max_points, random_state=42).sort_values('epoch')
             print(f"  Sampling {max_points:,} puntos de {len(df):,} totales")
         else:
-            sample_df = df
+            sample_df = df.copy()
         
         # Extraer venues
         bid_cols = [col for col in df.columns if col.endswith('_bid')]
@@ -411,13 +444,27 @@ class ConsolidatedTape:
         # ====================================================================
         ax1 = axes[0]
         
+        # Crear índice numérico para el eje X
+        x_values = range(len(sample_df))
+        
         for venue in venues:
             bid_col = f'{venue}_bid'
             ask_col = f'{venue}_ask'
             
             if bid_col in sample_df.columns and ask_col in sample_df.columns:
+                # Calcular mid price
                 mid_price = (sample_df[bid_col] + sample_df[ask_col]) / 2
-                ax1.plot(range(len(sample_df)), mid_price, label=venue, alpha=0.7)
+                
+                # Plotear solo valores válidos (no NaN)
+                valid_mask = mid_price.notna()
+                if valid_mask.any():
+                    ax1.plot(
+                        [x for x, v in zip(x_values, valid_mask) if v],
+                        mid_price[valid_mask].values, 
+                        label=venue, 
+                        alpha=0.7,
+                        linewidth=1.5
+                    )
         
         ax1.set_title(f'Consolidated Tape - Mid Prices por Venue\nISIN: {isin}', 
                      fontsize=14, fontweight='bold')
@@ -436,8 +483,20 @@ class ConsolidatedTape:
             ask_col = f'{venue}_ask'
             
             if bid_col in sample_df.columns and ask_col in sample_df.columns:
-                spread_bps = (sample_df[ask_col] - sample_df[bid_col]) * 10000
-                ax2.plot(range(len(sample_df)), spread_bps, label=venue, alpha=0.7)
+                # Calcular spread en basis points
+                spread = sample_df[ask_col] - sample_df[bid_col]
+                spread_bps = spread * 10000
+                
+                # Plotear solo valores válidos
+                valid_mask = spread_bps.notna() & (spread_bps >= 0)
+                if valid_mask.any():
+                    ax2.plot(
+                        [x for x, v in zip(x_values, valid_mask) if v],
+                        spread_bps[valid_mask].values, 
+                        label=venue, 
+                        alpha=0.7,
+                        linewidth=1.5
+                    )
         
         ax2.set_title('Spreads por Venue (basis points)', fontsize=14, fontweight='bold')
         ax2.set_xlabel('Snapshot Index')
@@ -446,6 +505,13 @@ class ConsolidatedTape:
         ax2.grid(True, alpha=0.3)
         
         plt.tight_layout()
-        plt.savefig(config.FIGURES_DIR / f'consolidated_tape_{isin}.png', dpi=150)
-        print(f"  Visualización guardada en: {config.FIGURES_DIR / f'consolidated_tape_{isin}.png'}")
+        
+        # Guardar figura
+        output_path = config.FIGURES_DIR / f'consolidated_tape_{isin}.png'
+        plt.savefig(output_path, dpi=150, bbox_inches='tight')
+        print(f"  Visualización guardada en: {output_path}")
+        
+        # Mostrar figura
+        plt.show(block=False)
+        plt.pause(0.1)  # Breve pausa para que se renderice
         plt.close()

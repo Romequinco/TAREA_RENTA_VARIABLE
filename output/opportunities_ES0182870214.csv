@@ -1,0 +1,2 @@
+epoch,global_max_bid,global_min_ask,venue_max_bid,venue_min_ask,bid_qty,ask_qty,executable_qty,is_opportunity,theoretical_profit,total_profit,is_rising_edge
+9223372036709551616,3.69,3.67,XMAD,CEUX,2704,644.0,644.0,True,0.020000000000000018,12.880000000000011,True

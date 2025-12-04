@@ -1,0 +1,2 @@
+epoch,execution_epoch,venue_max_bid,venue_min_ask,global_max_bid,global_min_ask,execution_bid,execution_ask,theoretical_profit,real_profit,profit_loss,executable_qty,total_profit,real_total_profit,profit_category,is_profitable
+9223372036709551616,9223372036709651616,XMAD,CEUX,3.69,3.67,3.69,3.67,0.020000000000000018,0.020000000000000018,0.0,644.0,12.880000000000011,12.880000000000011,Profitable,True
