@@ -144,8 +144,7 @@ class DataLoader:
             # PASO 4: Convertir tipos de datos
             # Epoch a int64 (puede venir en notación científica)
             df['epoch'] = pd.to_numeric(df['epoch'], errors='coerce')
-            df['epoch'] = (df['epoch'] * 1e9).astype('int64')  # Convertir a nanosegundos si es necesario
-            
+         
             # Precios y cantidades a float
             for col in ['px_bid_0', 'px_ask_0', 'qty_bid_0', 'qty_ask_0']:
                 df[col] = pd.to_numeric(df[col], errors='coerce')
@@ -230,7 +229,6 @@ class DataLoader:
             
             # Convertir tipos
             df['epoch'] = pd.to_numeric(df['epoch'], errors='coerce')
-            df['epoch'] = (df['epoch'] * 1e9).astype('int64')
             df['market_trading_status'] = pd.to_numeric(df['market_trading_status'], errors='coerce').astype('Int64')
             
             # Eliminar NaNs

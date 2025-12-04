@@ -1,2 +1,0 @@
-epoch,global_max_bid,global_min_ask,venue_max_bid,venue_min_ask,bid_qty,ask_qty,executable_qty,is_opportunity,theoretical_profit,total_profit,is_rising_edge
-9223372036709551616,3.655,3.648,XMAD,CEUX,62752,839.0,839.0,True,0.006999999999999673,5.872999999999726,True
