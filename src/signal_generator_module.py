@@ -88,12 +88,39 @@ class SignalGenerator:
         bids_df = df[bid_cols]
         asks_df = df[ask_cols]
         
-        df['max_bid'] = bids_df.max(axis=1)
-        df['min_ask'] = asks_df.min(axis=1)
+        # CRÍTICO: Verificar que no hay DataFrames vacíos
+        if len(bids_df) == 0 or len(asks_df) == 0:
+            logger.error("  ⚠️ CRÍTICO: DataFrame vacío en cálculo de global prices")
+            return df
         
-        # Identificar venues (optimizado: usar idxmax/idxmin directamente)
-        df['venue_max_bid'] = bids_df.idxmax(axis=1).str.replace('_bid', '')
-        df['venue_min_ask'] = asks_df.idxmin(axis=1).str.replace('_ask', '')
+        # CRÍTICO: max() y min() con skipna=True por defecto
+        # Si TODAS las columnas tienen NaN, max/min retorna NaN
+        # Esto causaría pérdida de señales, así que debemos manejar este caso
+        df['max_bid'] = bids_df.max(axis=1, skipna=True)
+        df['min_ask'] = asks_df.min(axis=1, skipna=True)
+        
+        # CRÍTICO: Si hay NaNs, reemplazar con valores extremos para que no bloqueen la comparación
+        # Pero solo si TODAS las columnas tienen NaN (caso extremo)
+        # Si solo algunas tienen NaN, max/min con skipna=True ya las ignora correctamente
+        
+        # Identificar venues ANTES de modificar NaNs
+        # Usar fillna temporalmente solo para idxmax/idxmin, no para modificar los valores reales
+        df['venue_max_bid'] = bids_df.fillna(-np.inf).idxmax(axis=1).str.replace('_bid', '')
+        df['venue_min_ask'] = asks_df.fillna(np.inf).idxmin(axis=1).str.replace('_ask', '')
+        
+        # Verificar NaNs después del cálculo
+        nan_max_bid = df['max_bid'].isna().sum()
+        nan_min_ask = df['min_ask'].isna().sum()
+        
+        if nan_max_bid > 0:
+            logger.warning(f"  ⚠️ ADVERTENCIA: {nan_max_bid} NaNs en max_bid después de cálculo")
+            logger.warning(f"    Esto puede causar pérdida de señales - verificando...")
+            # Si hay NaNs, significa que TODAS las columnas bid tienen NaN en esas filas
+            # En este caso, no podemos calcular max_bid, pero esto es un problema de datos
+            
+        if nan_min_ask > 0:
+            logger.warning(f"  ⚠️ ADVERTENCIA: {nan_min_ask} NaNs en min_ask después de cálculo")
+            logger.warning(f"    Esto puede causar pérdida de señales - verificando...")
         
         return df
     
@@ -115,17 +142,20 @@ class SignalGenerator:
         df['ask_qty'] = 0.0
         
         # Extraer cantidades de forma vectorizada por venue
+        # CRÍTICO: Manejar NaNs correctamente - si una cantidad es NaN, usar 0 (no ejecutable)
         for venue in venues:
             bid_qty_col = f'{venue}_bid_qty'
             ask_qty_col = f'{venue}_ask_qty'
             
             if bid_qty_col in df.columns:
                 mask_bid = df['venue_max_bid'] == venue
-                df.loc[mask_bid, 'bid_qty'] = df.loc[mask_bid, bid_qty_col]
+                # Si la cantidad es NaN, usar 0 (no hay cantidad disponible)
+                df.loc[mask_bid, 'bid_qty'] = df.loc[mask_bid, bid_qty_col].fillna(0.0)
             
             if ask_qty_col in df.columns:
                 mask_ask = df['venue_min_ask'] == venue
-                df.loc[mask_ask, 'ask_qty'] = df.loc[mask_ask, ask_qty_col]
+                # Si la cantidad es NaN, usar 0 (no hay cantidad disponible)
+                df.loc[mask_ask, 'ask_qty'] = df.loc[mask_ask, ask_qty_col].fillna(0.0)
         
         return df
     
@@ -138,23 +168,31 @@ class SignalGenerator:
             DataFrame con columnas añadidas: theoretical_profit, executable_qty, total_profit
         """
         # Profit por unidad: (Max Bid - Min Ask)
+        # CRÍTICO: Manejar NaNs - si alguno es NaN, profit será NaN, pero eso ya se maneja en signal
         df['theoretical_profit'] = df['max_bid'] - df['min_ask']
         
         # Cantidad ejecutable: min(bid_size, ask_size)
-        df['executable_qty'] = np.minimum(df['bid_qty'], df['ask_qty'])
+        # CRÍTICO: fillna(0) para asegurar que si hay NaN, la cantidad sea 0 (no ejecutable)
+        df['executable_qty'] = np.minimum(
+            df['bid_qty'].fillna(0.0), 
+            df['ask_qty'].fillna(0.0)
+        )
         
         # Profit total: Profit por unidad * Cantidad ejecutable
-        df['total_profit'] = df['theoretical_profit'] * df['executable_qty']
+        # CRÍTICO: Si theoretical_profit es NaN o executable_qty es 0, total_profit debe ser 0
+        df['total_profit'] = (df['theoretical_profit'].fillna(0.0) * df['executable_qty']).fillna(0.0)
         
         # Inicializar cantidades remanentes
-        df['remaining_bid_qty'] = df['bid_qty'].copy()
-        df['remaining_ask_qty'] = df['ask_qty'].copy()
+        df['remaining_bid_qty'] = df['bid_qty'].fillna(0.0)
+        df['remaining_ask_qty'] = df['ask_qty'].fillna(0.0)
         
-        # Si no hay oportunidad, profit = 0
-        mask_no_opp = df['max_bid'] <= df['min_ask']
-        df.loc[mask_no_opp, 'theoretical_profit'] = 0
-        df.loc[mask_no_opp, 'total_profit'] = 0
-        df.loc[mask_no_opp, 'executable_qty'] = 0
+        # CRÍTICO: Solo poner profit=0 si realmente NO hay oportunidad
+        # No poner profit=0 si hay NaNs (eso ya se maneja en la detección de señal)
+        # Usar la columna 'signal' que ya tiene en cuenta los NaNs
+        mask_no_opp = df['signal'] == 0
+        df.loc[mask_no_opp, 'theoretical_profit'] = 0.0
+        df.loc[mask_no_opp, 'total_profit'] = 0.0
+        df.loc[mask_no_opp, 'executable_qty'] = 0.0
         
         return df
     
@@ -254,18 +292,23 @@ class SignalGenerator:
             stats['same_venue'] = same_venue
             
             # Filtrar señales válidas
+            # CRÍTICO: Manejar NaNs correctamente - solo comparar si ambos valores no son NaN
             valid_mask = (
+                rising_edges['max_bid'].notna() &
+                rising_edges['min_ask'].notna() &
                 (rising_edges['max_bid'] > rising_edges['min_ask']) &
                 (rising_edges['theoretical_profit'] >= 0) &
-                (rising_edges.get('executable_qty', rising_edges.get('tradeable_qty', 0)) > 0) &
+                (rising_edges.get('executable_qty', rising_edges.get('tradeable_qty', pd.Series([0]))).fillna(0) > 0) &
                 (venue_max_col != venue_min_col)
             )
         else:
             stats['same_venue'] = 0
             valid_mask = (
+                rising_edges['max_bid'].notna() &
+                rising_edges['min_ask'].notna() &
                 (rising_edges['max_bid'] > rising_edges['min_ask']) &
                 (rising_edges['theoretical_profit'] >= 0) &
-                (rising_edges.get('executable_qty', rising_edges.get('tradeable_qty', 0)) > 0)
+                (rising_edges.get('executable_qty', rising_edges.get('tradeable_qty', pd.Series([0]))).fillna(0) > 0)
             )
         
         valid_signals = rising_edges[valid_mask].copy()
@@ -380,10 +423,52 @@ class SignalGenerator:
         
         # PASO 4: Detectar condición de arbitraje
         print("  Detectando condición de arbitraje (Bid > Ask)...")
-        df['signal'] = (df['max_bid'] > df['min_ask']).astype(int)
-        df['is_opportunity'] = df['signal'].astype(bool)
+        
+        # CRÍTICO: Verificar que no hay NaNs antes de comparar
+        nan_max_bid = df['max_bid'].isna().sum()
+        nan_min_ask = df['min_ask'].isna().sum()
+        
+        if nan_max_bid > 0:
+            logger.warning(f"  ⚠️ ADVERTENCIA: {nan_max_bid} NaNs en max_bid antes de detectar señales")
+        if nan_min_ask > 0:
+            logger.warning(f"  ⚠️ ADVERTENCIA: {nan_min_ask} NaNs en min_ask antes de detectar señales")
+        
+        # Detectar señal: max_bid > min_ask (sin ningún threshold adicional)
+        # CRÍTICO: Manejar NaNs correctamente - si hay NaN, la comparación retorna False
+        # Pero queremos detectar oportunidades incluso si uno de los valores es NaN (siempre que el otro no lo sea)
+        # Sin embargo, si AMBOS son NaN, no podemos detectar arbitraje
+        
+        # Comparación estándar: max_bid > min_ask
+        # Si max_bid es NaN o min_ask es NaN, la comparación retorna False (no detecta señal)
+        # Esto es correcto porque no podemos comparar con NaN
+        
+        # PERO: Si max_bid NO es NaN y min_ask NO es NaN, debemos comparar correctamente
+        # Usar fillna con valores extremos solo para la comparación, no para modificar los datos
+        signal_mask = (
+            df['max_bid'].notna() & 
+            df['min_ask'].notna() & 
+            (df['max_bid'] > df['min_ask'])
+        )
+        
+        df['signal'] = signal_mask.astype(int)
+        df['is_opportunity'] = signal_mask.astype(bool)
+        
+        # CRÍTICO: Reportar cuántas oportunidades se perdieron por NaNs
+        nan_blocked = (
+            (df['max_bid'].isna() | df['min_ask'].isna()) & 
+            ~(df['max_bid'].isna() & df['min_ask'].isna())  # Al menos uno tiene valor
+        ).sum()
+        
+        if nan_blocked > 0:
+            logger.warning(f"  ⚠️ ADVERTENCIA: {nan_blocked:,} snapshots no pudieron evaluarse por NaNs parciales")
+            logger.warning(f"    (tienen algunos venues con datos pero no todos)")
+        
+        # DIAGNÓSTICO: Reportar cuántas señales se detectaron
+        total_signals = df['signal'].sum()
+        logger.info(f"  Total snapshots con señal detectada: {total_signals:,} de {len(df):,} ({total_signals/len(df)*100:.4f}%)")
         
         # PASO 5: Calcular profits y cantidades ejecutables
+        # CRÍTICO: Calcular profits ANTES de aplicar rising edge, pero después de detectar señal
         print("  Calculando profit teórico...")
         df = self._calculate_profits(df)
         

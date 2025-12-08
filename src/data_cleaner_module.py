@@ -306,12 +306,17 @@ class DataCleaner:
         
         # CRÍTICO: Eliminar snapshots sin estado asignado (no sabemos si son continuous trading)
         # Si no hay estado, no podemos garantizar que sea continuous trading
+        # PERO: Si eliminamos todos los datos, mejor mantenerlos sin filtrar para no perder señales
         merged_with_status = merged[merged['market_trading_status'].notna()].copy()
         
         if len(merged_with_status) == 0:
             logger.error(f"    [CRÍTICO] Ningún snapshot tiene estado asignado después del merge_asof para {mic}")
             logger.error(f"    Esto puede indicar que los timestamps de QTE y STS no coinciden")
-            logger.error(f"    Manteniendo datos originales sin filtrar")
+            logger.error(f"    OPCIONES:")
+            logger.error(f"      1. Mantener datos sin filtrar (puede incluir non-trading)")
+            logger.error(f"      2. Eliminar todos los datos (pérdida total de señales)")
+            logger.error(f"    Eligiendo opción 1: Manteniendo datos originales sin filtrar")
+            logger.warning(f"    ⚠️ ADVERTENCIA: Esto puede incluir snapshots de non-trading, pero evita pérdida total")
             return qte_df, 0
         
         # Filtrar por códigos válidos de continuous trading

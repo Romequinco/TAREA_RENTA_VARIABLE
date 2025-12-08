@@ -138,7 +138,13 @@ class ConsolidatedTape:
         df = df.sort_values('epoch').reset_index(drop=True)
         
         # Eliminar duplicados en el mismo timestamp (tomar último)
-        df = df.drop_duplicates(subset=['epoch'], keep='last')
+        # CRÍTICO: Solo eliminar si hay duplicados reales, no eliminar filas válidas
+        if df['epoch'].duplicated().any():
+            rows_before_dedup = len(df)
+            df = df.drop_duplicates(subset=['epoch'], keep='last')
+            removed_dups = rows_before_dedup - len(df)
+            if removed_dups > 0:
+                logger.debug(f"    Eliminados {removed_dups} duplicados en mismo epoch para {venue_name}")
         
         return df
     
@@ -266,24 +272,64 @@ class ConsolidatedTape:
         nans_before = consolidated.isna().sum().sum()
         print(f"    NaNs antes: {nans_before:,}")
         
+        # CRÍTICO: Verificar que el DataFrame está ordenado antes de forward fill
+        if not consolidated['epoch'].is_monotonic_increasing:
+            logger.warning("  ⚠️ ADVERTENCIA: Epoch no es monotónico antes de forward fill, ordenando...")
+            consolidated = consolidated.sort_values('epoch').reset_index(drop=True)
+        
         # Forward fill: Propagar último valor conocido hacia adelante
         # Ejemplo: Si XMAD actualiza en T=100 y T=200, el precio en T=150 será el de T=100
-        consolidated = consolidated.ffill()
+        # CRÍTICO: Usar limit=None para propagar hasta el final (sin límite)
+        # Esto asegura que todos los NaNs se rellenen si hay al menos un valor previo
+        consolidated = consolidated.ffill(limit=None)
         
         nans_after = consolidated.isna().sum().sum()
         print(f"    NaNs después: {nans_after:,}")
         
-        # PASO 5: Eliminar primeras filas con NaNs
-        # Opción implementada: Eliminar filas iniciales incompletas
-        initial_nans = consolidated.isna().sum(axis=1)
-        
-        if initial_nans.max() > 0:
-            # Encontrar primera fila completa
-            first_complete_row = (initial_nans == 0).idxmax() if (initial_nans == 0).any() else 0
+        # CRÍTICO: Verificar que forward fill funcionó
+        # Si todavía hay NaNs después de forward fill, puede ser porque:
+        # 1. Las primeras filas tienen NaNs (no hay valores previos para propagar)
+        # 2. Hay un problema con el forward fill
+        if nans_after > nans_before:
+            logger.error(f"  ⚠️ CRÍTICO: NaNs aumentaron después de forward fill (antes: {nans_before}, después: {nans_after})")
+        elif nans_after == nans_before and nans_before > 0:
+            logger.warning(f"  ⚠️ ADVERTENCIA: Forward fill no eliminó NaNs (quedan {nans_after:,})")
+            logger.warning(f"    Esto puede causar pérdida de señales - verificando...")
             
-            if first_complete_row > 0:
-                print(f"    Eliminando primeras {first_complete_row} filas incompletas")
-                consolidated = consolidated.iloc[first_complete_row:].reset_index(drop=True)
+            # Intentar backward fill para las primeras filas si es necesario
+            if nans_after > 0:
+                # Backward fill solo para las primeras filas que tienen NaN
+                # Esto propaga el primer valor conocido hacia atrás
+                consolidated = consolidated.bfill(limit=None)
+                nans_after_bfill = consolidated.isna().sum().sum()
+                if nans_after_bfill < nans_after:
+                    logger.info(f"    Backward fill eliminó {nans_after - nans_after_bfill:,} NaNs adicionales")
+                    nans_after = nans_after_bfill
+        
+        # PASO 5: Eliminar primeras filas con NaNs
+        # CRÍTICO: Solo eliminar filas donde TODOS los venues tienen NaN
+        # Si al menos un venue tiene datos, mantener la fila (forward fill ya propagó valores)
+        # Esto evita perder oportunidades donde algunos venues ya tienen datos
+        
+        # Contar NaNs por fila en columnas de precios (no en epoch)
+        price_cols = [col for col in consolidated.columns 
+                     if ('_bid' in col or '_ask' in col) and not col.endswith('_qty')]
+        
+        if price_cols:
+            initial_nans = consolidated[price_cols].isna().sum(axis=1)
+            
+            # CRÍTICO: Solo eliminar filas donde TODAS las columnas de precios son NaN
+            # Si al menos una columna tiene valor, mantener la fila
+            all_nans_mask = (initial_nans == len(price_cols))
+            
+            if all_nans_mask.any():
+                first_valid_row = (~all_nans_mask).idxmax() if (~all_nans_mask).any() else 0
+                
+                if first_valid_row > 0:
+                    rows_to_remove = all_nans_mask[:first_valid_row].sum()
+                    if rows_to_remove > 0:
+                        print(f"    Eliminando primeras {rows_to_remove} filas con TODOS los venues en NaN")
+                        consolidated = consolidated[~all_nans_mask].reset_index(drop=True)
         
         print(f"\n  Tape final: {consolidated.shape}")
         
