@@ -42,22 +42,42 @@ class SignalGenerator:
     
     El sistema busca instantes donde se puede comprar en un venue y
     vender en otro simultáneamente con profit positivo.
+    
+    REQUISITO 1: Registra y excluye oportunidades ya ejecutadas.
+    REQUISITO 2: Soporta ejecución parcial con cantidades (bid/ask size).
     """
     
-    @staticmethod
-    def detect_opportunities(consolidated_tape: pd.DataFrame) -> pd.DataFrame:
+    def __init__(self):
+        """
+        Inicializa el generador de señales con tracking de ejecuciones.
+        """
+        self.executed_trades = []  # Lista de trades ejecutados
+        self.execution_id_counter = 0  # Contador para IDs de ejecución
+    
+    def detect_opportunities(self, 
+                            consolidated_tape: pd.DataFrame, 
+                            executed_trades: list = None,
+                            isin: str = None) -> pd.DataFrame:
         """
         Detecta todas las oportunidades de arbitraje en el tape.
+        
+        REQUISITO 1: Excluye oportunidades ya ejecutadas de snapshots posteriores.
+        REQUISITO 2: Calcula size_executable = min(bid_size, ask_size) y soporta ejecución parcial.
         
         Proceso:
         1. Para cada timestamp, calcular Global Max Bid y Global Min Ask
         2. Identificar venues del max bid y min ask
         3. Detectar si Max Bid > Min Ask (arbitrage condition)
-        4. Calcular profit teórico
+        4. Calcular profit teórico y cantidad ejecutable
         5. Aplicar Rising Edge Detection
+        6. Filtrar oportunidades ya ejecutadas (REQUISITO 1)
         
         Args:
             consolidated_tape: DataFrame con columnas [epoch, XMAD_bid, XMAD_ask, ...]
+            executed_trades: Lista de dicts con trades ejecutados (opcional)
+                           Cada dict debe tener: epoch, venue_max_bid, venue_min_ask, 
+                           executed_qty, execution_id
+            isin: ISIN del instrumento (opcional, para tracking)
             
         Returns:
             DataFrame con columnas:
@@ -68,10 +88,14 @@ class SignalGenerator:
             - venue_min_ask: Venue con el mejor ask
             - bid_qty: Cantidad disponible en el mejor bid
             - ask_qty: Cantidad disponible en el mejor ask
+            - executable_qty: REQUISITO 2: min(bid_size, ask_size)
+            - remaining_bid_qty: REQUISITO 2: Cantidad remanente en bid después de ejecución
+            - remaining_ask_qty: REQUISITO 2: Cantidad remanente en ask después de ejecución
             - is_opportunity: Boolean (True si Bid > Ask)
             - theoretical_profit: Profit por unidad
             - total_profit: Profit total (price * quantity)
             - is_rising_edge: Boolean (True si es primera aparición)
+            - _consumed_execution_id: REQUISITO 1: ID de ejecución si fue consumida (None si nueva)
         """
         print("\n" + "=" * 80)
         print("DETECCIÓN DE SEÑALES DE ARBITRAJE")
@@ -144,15 +168,19 @@ class SignalGenerator:
         df['is_opportunity'] = df['global_max_bid'] > df['global_min_ask']
         
         # ====================================================================
-        # PASO 6: Calcular profit teórico
+        # PASO 6: Calcular profit teórico y cantidades ejecutables
         # ====================================================================
         print("  Calculando profit teórico...")
         
         # Profit por unidad: (Max Bid - Min Ask)
         df['theoretical_profit'] = df['global_max_bid'] - df['global_min_ask']
         
-        # Cantidad ejecutable: Mínimo entre bid qty y ask qty
+        # REQUISITO 2: size_executable = min(bid_size, ask_size)
         df['executable_qty'] = np.minimum(df['bid_qty'], df['ask_qty'])
+        
+        # REQUISITO 2: Inicializar cantidades remanentes (antes de aplicar ejecuciones)
+        df['remaining_bid_qty'] = df['bid_qty'].copy()
+        df['remaining_ask_qty'] = df['ask_qty'].copy()
         
         # Profit total: Profit por unidad * Cantidad ejecutable
         df['total_profit'] = df['theoretical_profit'] * df['executable_qty']
@@ -160,6 +188,7 @@ class SignalGenerator:
         # Si no hay oportunidad, profit = 0
         df.loc[~df['is_opportunity'], 'theoretical_profit'] = 0
         df.loc[~df['is_opportunity'], 'total_profit'] = 0
+        df.loc[~df['is_opportunity'], 'executable_qty'] = 0
         
         # ====================================================================
         # PASO 7: Rising Edge Detection
@@ -181,14 +210,68 @@ class SignalGenerator:
         df = df.drop('prev_opportunity', axis=1)
         
         # ====================================================================
-        # PASO 8: Filtrar oportunidades reales
+        # PASO 8: REQUISITO 1 - Filtrar oportunidades ya ejecutadas
+        # ====================================================================
+        print("  Filtrando oportunidades ya ejecutadas...")
+        
+        # Inicializar columna _consumed_execution_id
+        df['_consumed_execution_id'] = None
+        
+        if executed_trades and len(executed_trades) > 0:
+            # Crear DataFrame de trades ejecutados para merge eficiente
+            exec_df = pd.DataFrame(executed_trades)
+            
+            # Para cada oportunidad, verificar si ya fue ejecutada
+            # Una oportunidad está ejecutada si:
+            # - Mismo epoch (o posterior)
+            # - Mismos venues (venue_max_bid y venue_min_ask)
+            # - Mismo ISIN (si está disponible)
+            
+            for idx, row in df[df['is_opportunity']].iterrows():
+                # Buscar trades ejecutados que coincidan
+                matching_execs = exec_df[
+                    (exec_df['epoch'] <= row['epoch']) &
+                    (exec_df['venue_max_bid'] == row['venue_max_bid']) &
+                    (exec_df['venue_min_ask'] == row['venue_min_ask'])
+                ]
+                
+                if isin and 'isin' in exec_df.columns:
+                    matching_execs = matching_execs[matching_execs['isin'] == isin]
+                
+                if len(matching_execs) > 0:
+                    # Oportunidad ya fue ejecutada
+                    # Usar el execution_id más reciente
+                    latest_exec = matching_execs.loc[matching_execs['epoch'].idxmax()]
+                    df.at[idx, '_consumed_execution_id'] = latest_exec.get('execution_id', None)
+                    
+                    # REQUISITO 2: Ajustar cantidades remanentes por ejecución parcial
+                    executed_qty = latest_exec.get('executed_qty', 0)
+                    df.at[idx, 'remaining_bid_qty'] = max(0, row['bid_qty'] - executed_qty)
+                    df.at[idx, 'remaining_ask_qty'] = max(0, row['ask_qty'] - executed_qty)
+                    df.at[idx, 'executable_qty'] = np.minimum(
+                        df.at[idx, 'remaining_bid_qty'],
+                        df.at[idx, 'remaining_ask_qty']
+                    )
+                    
+                    # Recalcular profit con cantidades ajustadas
+                    df.at[idx, 'total_profit'] = df.at[idx, 'theoretical_profit'] * df.at[idx, 'executable_qty']
+            
+            # Filtrar oportunidades que ya fueron completamente ejecutadas
+            # (si executable_qty <= 0 después de ajustar)
+            fully_executed = (df['_consumed_execution_id'].notna()) & (df['executable_qty'] <= 0)
+            if fully_executed.any():
+                logger.info(f"    Excluidas {fully_executed.sum():,} oportunidades ya completamente ejecutadas")
+        
+        # ====================================================================
+        # PASO 9: Filtrar oportunidades válidas (nuevas o parcialmente ejecutables)
         # ====================================================================
         print("  Filtrando oportunidades válidas...")
         
-        # Filtrar por threshold mínimo de profit
+        # Filtrar por threshold mínimo de profit Y que tengan cantidad ejecutable > 0
         valid_opportunities = df[
             (df['is_rising_edge']) & 
-            (df['total_profit'] >= config.MIN_THEORETICAL_PROFIT)
+            (df['total_profit'] >= config.MIN_THEORETICAL_PROFIT) &
+            (df['executable_qty'] > 0)  # REQUISITO 2: Solo oportunidades con cantidad ejecutable
         ].copy()
         
         # ====================================================================
@@ -214,14 +297,19 @@ class SignalGenerator:
             print(f"    - Profit medio por oportunidad: €{avg_profit:.2f}")
             print(f"    - Profit máximo: €{max_profit:.2f}")
         
-        # Seleccionar columnas relevantes
-        signals_df = df[[
+        # Seleccionar columnas relevantes (incluyendo nuevas columnas de REQUISITO 1 y 2)
+        cols_to_keep = [
             'epoch', 'global_max_bid', 'global_min_ask',
             'venue_max_bid', 'venue_min_ask',
             'bid_qty', 'ask_qty', 'executable_qty',
+            'remaining_bid_qty', 'remaining_ask_qty',  # REQUISITO 2
             'is_opportunity', 'theoretical_profit', 'total_profit',
-            'is_rising_edge'
-        ]].copy()
+            'is_rising_edge', '_consumed_execution_id'  # REQUISITO 1
+        ]
+        
+        # Solo incluir columnas que existen
+        available_cols = [col for col in cols_to_keep if col in df.columns]
+        signals_df = df[available_cols].copy()
         
         return signals_df
     
@@ -401,9 +489,16 @@ class SignalGenerator:
         plt.savefig(output_path, dpi=150, bbox_inches='tight')
         print(f"  Visualización guardada en: {output_path}")
         
-        plt.show(block=False)
-        plt.pause(0.1)
-        plt.close()
+        try:
+            plt.show(block=False)
+            plt.pause(0.5)  # Pausa más larga para asegurar renderizado
+            print(f"  [OK] Gráficas mostradas en ventana")
+        except Exception as e:
+            logger.warning(f"  No se pudo mostrar gráficas interactivas: {e}")
+            print(f"  [INFO] Gráficas guardadas en: {output_path}")
+        
+        # No cerrar inmediatamente para que el usuario pueda verlas
+        # plt.close()  # Comentado para permitir visualización
         
         print("  Visualizaciones generadas")
     
@@ -412,14 +507,17 @@ class SignalGenerator:
         """
         Exporta las oportunidades detectadas a CSV.
         
+        REQUISITO 2: Añade tabla opportunities.csv mostrando qué se ejecutó.
+        
         Args:
             signals_df: DataFrame con señales
             output_path: Path para guardar el CSV (opcional)
         """
-        # Filtrar solo rising edges
+        # Filtrar solo rising edges con cantidad ejecutable > 0
         opportunities = signals_df[
             (signals_df['is_rising_edge']) & 
-            (signals_df['total_profit'] > 0)
+            (signals_df['total_profit'] > 0) &
+            (signals_df.get('executable_qty', pd.Series([1]*len(signals_df))) > 0)
         ].copy()
         
         if len(opportunities) == 0:
@@ -432,8 +530,23 @@ class SignalGenerator:
         # Asegurar que el directorio existe
         config.OUTPUT_DIR.mkdir(exist_ok=True)
         
+        # REQUISITO 2: Añadir columnas de ejecución si no existen
+        if 'executed_qty' not in opportunities.columns:
+            opportunities['executed_qty'] = 0
+        if 'remaining_bid_qty' not in opportunities.columns:
+            opportunities['remaining_bid_qty'] = opportunities.get('bid_qty', 0)
+        if 'remaining_ask_qty' not in opportunities.columns:
+            opportunities['remaining_ask_qty'] = opportunities.get('ask_qty', 0)
+        
         # Exportar
         opportunities.to_csv(output_path, index=False)
         
         print(f"\n  Oportunidades exportadas a: {output_path}")
         print(f"    Total oportunidades: {len(opportunities):,}")
+        
+        # REQUISITO 2: Mostrar resumen de ejecuciones
+        if '_consumed_execution_id' in opportunities.columns:
+            executed_count = opportunities['_consumed_execution_id'].notna().sum()
+            if executed_count > 0:
+                print(f"    Oportunidades ya ejecutadas: {executed_count:,}")
+                print(f"    Oportunidades nuevas: {len(opportunities) - executed_count:,}")

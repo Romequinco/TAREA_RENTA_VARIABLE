@@ -242,6 +242,7 @@ class DataCleaner:
         2. Invalid prices
         3. Crossed books
         4. Market status (con filtrado adaptativo)
+        5. Generar columna seq si no existe (REQUISITO: secuencia después del epoch)
         
         Args:
             venue_dict: Dict con keys 'qte' y 'sts'
@@ -263,6 +264,33 @@ class DataCleaner:
         df = self.clean_invalid_prices(df)
         df = self.clean_crossed_book(df)
         df = self.filter_by_market_status(df, sts_df, mic)
+        
+        # REQUISITO 5: Generar columna seq si no existe
+        # Si varios eventos tienen el mismo epoch, usar columna seq si existe
+        # Si no existe, generarla determinísticamente: groupby(['session','isin','epoch']).cumcount()
+        if 'seq' not in df.columns:
+            # Intentar usar session e isin si están disponibles
+            grouping_cols = []
+            if 'session' in df.columns:
+                grouping_cols.append('session')
+            if 'isin' in df.columns:
+                grouping_cols.append('isin')
+            
+            # Siempre agrupar por epoch
+            grouping_cols.append('epoch')
+            
+            if len(grouping_cols) > 1:
+                # Generar seq determinísticamente
+                df = df.sort_values(grouping_cols + ['epoch']).reset_index(drop=True)
+                df['seq'] = df.groupby(grouping_cols, sort=False).cumcount()
+                logger.info(f"    Generada columna 'seq' usando groupby({grouping_cols}).cumcount()")
+            else:
+                # Si no hay session/isin, solo agrupar por epoch
+                df = df.sort_values('epoch').reset_index(drop=True)
+                df['seq'] = df.groupby('epoch', sort=False).cumcount()
+                logger.info(f"    Generada columna 'seq' usando groupby('epoch').cumcount()")
+        else:
+            logger.info(f"    Columna 'seq' ya existe en los datos")
         
         print(f"    [OK] Snapshots finales: {len(df):,} (limpios)")
         

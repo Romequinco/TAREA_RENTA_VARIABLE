@@ -186,12 +186,13 @@ class ConsolidatedTape:
             print(f"    Merging con {venue_name}... ", end='')
             
             try:
-                # merge_asof: busca el timestamp más cercano
+                # merge_asof: busca el timestamp más cercano ANTERIOR (backward)
+                # REQUISITO: merge_asof obligatorio en backward para mantener solo datos de continuous trading
                 consolidated = pd.merge_asof(
                     consolidated,
                     venue_df,
                     on='epoch',
-                    direction='nearest',  # Buscar timestamp más cercano
+                    direction='backward',  # REQUISITO: Usar backward para propagar último valor conocido
                     tolerance=self.time_bin_ns  # Tolerancia de redondeo
                 )
                 print(f"OK ({len(consolidated):,} rows)")
@@ -512,6 +513,13 @@ class ConsolidatedTape:
         print(f"  Visualización guardada en: {output_path}")
         
         # Mostrar figura
-        plt.show(block=False)
-        plt.pause(0.1)  # Breve pausa para que se renderice
-        plt.close()
+        try:
+            plt.show(block=False)
+            plt.pause(0.5)  # Pausa más larga para asegurar renderizado
+            print(f"  [OK] Gráfica mostrada en ventana")
+        except Exception as e:
+            logger.warning(f"  No se pudo mostrar gráfica interactiva: {e}")
+            print(f"  [INFO] Gráfica guardada en: {output_path}")
+        
+        # No cerrar inmediatamente para que el usuario pueda verla
+        # plt.close()  # Comentado para permitir visualización

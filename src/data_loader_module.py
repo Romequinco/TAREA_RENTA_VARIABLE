@@ -371,6 +371,18 @@ class DataLoader:
             else:
                 logger.info(f"  [INFO] Archivo STS no encontrado para {mic}")
             
+            # REQUISITO 5: Añadir columnas session e isin si no existen
+            # Extraer del filename para tenerlas disponibles para generación de seq
+            parts = Path(qte_file).stem.split('_')
+            if len(parts) >= 3:
+                session = parts[1] if 'session' not in qte_df.columns else None
+                isin_from_file = parts[2] if 'isin' not in qte_df.columns else None
+                
+                if session and 'session' not in qte_df.columns:
+                    qte_df['session'] = session
+                if isin_from_file and 'isin' not in qte_df.columns:
+                    qte_df['isin'] = isin_from_file
+            
             # Almacenar
             venue_data[mic] = {
                 'qte': qte_df,

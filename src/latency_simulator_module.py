@@ -61,9 +61,13 @@ class LatencySimulator:
     
     def simulate_execution(self, 
                           signals_df: pd.DataFrame,
-                          consolidated_tape: pd.DataFrame) -> pd.DataFrame:
+                          consolidated_tape: pd.DataFrame,
+                          isin: str = None) -> Tuple[pd.DataFrame, list]:
         """
         Simula la ejecución de oportunidades considerando latencia.
+        
+        REQUISITO 1: Registra trades ejecutados en executed_trades.
+        REQUISITO 2: Soporta ejecución parcial con cantidades.
         
         ALGORITMO:
         1. Para cada oportunidad (rising edge) en timestamp T
@@ -71,25 +75,32 @@ class LatencySimulator:
         3. Buscar los precios en el consolidated tape en T_execution
         4. Re-calcular profit con precios time-shifted
         5. Comparar profit original vs profit real
+        6. Registrar trade ejecutado si es profitable
         
         Args:
             signals_df: DataFrame de signal_generator.detect_opportunities()
                        Debe contener: [epoch, global_max_bid, global_min_ask,
                                       venue_max_bid, venue_min_ask, 
-                                      theoretical_profit, is_rising_edge]
+                                      theoretical_profit, is_rising_edge,
+                                      executable_qty, remaining_bid_qty, remaining_ask_qty]
             
             consolidated_tape: DataFrame con todos los precios por venue
                               [epoch, XMAD_bid, XMAD_ask, ...]
+            isin: ISIN del instrumento (opcional, para tracking)
         
         Returns:
-            DataFrame con columnas adicionales:
-            - execution_epoch: T + latency
-            - execution_bid: Precio bid en T_execution en venue_max_bid
-            - execution_ask: Precio ask en T_execution en venue_min_ask
-            - real_profit: Profit después de latencia
-            - profit_loss: Pérdida debido a latencia (original - real)
-            - is_profitable: Boolean (True si real_profit > 0)
-            - profit_category: 'Profitable' / 'Break-even' / 'Loss'
+            Tuple de (DataFrame, list):
+            - DataFrame con columnas adicionales:
+              - execution_epoch: T + latency
+              - execution_bid: Precio bid en T_execution en venue_max_bid
+              - execution_ask: Precio ask en T_execution en venue_min_ask
+              - executed_qty: REQUISITO 2: Cantidad realmente ejecutada
+              - real_profit: Profit después de latencia
+              - profit_loss: Pérdida debido a latencia (original - real)
+              - is_profitable: Boolean (True si real_profit > 0)
+              - profit_category: 'Profitable' / 'Break-even' / 'Loss'
+              - execution_id: REQUISITO 1: ID único de ejecución
+            - list: Lista de dicts con trades ejecutados (REQUISITO 1)
         """
         
         print("\n" + "=" * 80)
@@ -104,7 +115,7 @@ class LatencySimulator:
         
         if len(opportunities) == 0:
             logger.warning("  No hay rising edges para simular")
-            return pd.DataFrame()
+            return pd.DataFrame(), []  # Retornar tupla vacía
         
         print(f"  Total oportunidades a simular: {len(opportunities):,}")
         
@@ -183,10 +194,36 @@ class LatencySimulator:
             opportunities_with_execution['execution_ask']
         )
         
-        # Cantidad ejecutable (usar la misma que en detección original)
+        # REQUISITO 2: Cantidad ejecutable (usar executable_qty o remaining si existe)
+        if 'executable_qty' in opportunities_with_execution.columns:
+            exec_qty_col = 'executable_qty'
+        elif 'remaining_bid_qty' in opportunities_with_execution.columns and 'remaining_ask_qty' in opportunities_with_execution.columns:
+            # Calcular cantidad ejecutable desde remanentes
+            opportunities_with_execution['executable_qty'] = np.minimum(
+                opportunities_with_execution['remaining_bid_qty'],
+                opportunities_with_execution['remaining_ask_qty']
+            )
+            exec_qty_col = 'executable_qty'
+        else:
+            # Fallback: usar bid_qty o ask_qty mínimo
+            opportunities_with_execution['executable_qty'] = np.minimum(
+                opportunities_with_execution.get('bid_qty', 0),
+                opportunities_with_execution.get('ask_qty', 0)
+            )
+            exec_qty_col = 'executable_qty'
+        
+        # REQUISITO 2: Cantidad realmente ejecutada (puede ser parcial)
+        # Por ahora, ejecutamos toda la cantidad ejecutable si es profitable
+        opportunities_with_execution['executed_qty'] = np.where(
+            opportunities_with_execution['real_profit'] > 0.0001,  # Solo si es profitable
+            opportunities_with_execution[exec_qty_col],
+            0
+        )
+        
+        # Profit total real: Profit por unidad * Cantidad ejecutada
         opportunities_with_execution['real_total_profit'] = (
             opportunities_with_execution['real_profit'] * 
-            opportunities_with_execution['executable_qty']
+            opportunities_with_execution['executed_qty']
         )
         
         # Pérdida debido a latencia
@@ -228,6 +265,52 @@ class LatencySimulator:
         )
         
         # ====================================================================
+        # REQUISITO 1: Registrar trades ejecutados
+        # ====================================================================
+        print("  Registrando trades ejecutados...")
+        
+        executed_trades = []
+        execution_id_counter = 0
+        
+        # Filtrar solo oportunidades profitable que fueron ejecutadas
+        profitable_executions = opportunities_with_execution[
+            (opportunities_with_execution['profit_category'] == 'Profitable') &
+            (opportunities_with_execution['executed_qty'] > 0)
+        ].copy()
+        
+        for idx, row in profitable_executions.iterrows():
+            execution_id_counter += 1
+            execution_id = f"EXEC_{execution_id_counter:08d}"
+            
+            # REQUISITO 1: Registrar trade ejecutado
+            executed_trade = {
+                'execution_id': execution_id,
+                'epoch': row['epoch'],
+                'execution_epoch': row.get('execution_epoch', row['epoch']),
+                'venue_max_bid': row['venue_max_bid'],
+                'venue_min_ask': row['venue_min_ask'],
+                'executed_qty': row['executed_qty'],
+                'execution_bid': row.get('execution_bid', row.get('global_max_bid')),
+                'execution_ask': row.get('execution_ask', row.get('global_min_ask')),
+                'real_profit': row['real_profit'],
+                'real_total_profit': row['real_total_profit']
+            }
+            
+            if isin:
+                executed_trade['isin'] = isin
+            
+            executed_trades.append(executed_trade)
+            
+            # Añadir execution_id al DataFrame
+            opportunities_with_execution.at[idx, 'execution_id'] = execution_id
+        
+        # Inicializar execution_id como None para oportunidades no ejecutadas
+        if 'execution_id' not in opportunities_with_execution.columns:
+            opportunities_with_execution['execution_id'] = None
+        
+        print(f"    Trades ejecutados registrados: {len(executed_trades):,}")
+        
+        # ====================================================================
         # RESUMEN DE RESULTADOS
         # ====================================================================
         print(f"\n  RESULTADOS DE SIMULACIÓN:")
@@ -262,7 +345,8 @@ class LatencySimulator:
             ]['real_total_profit'].mean()
             print(f"    - Profit medio (solo profitable): €{avg_profit_profitable:.4f}")
         
-        return opportunities_with_execution
+        # REQUISITO 1: Retornar tanto el DataFrame como la lista de trades ejecutados
+        return opportunities_with_execution, executed_trades
     
     def sensitivity_analysis(self,
                            signals_df: pd.DataFrame,
@@ -302,8 +386,8 @@ class LatencySimulator:
             # Crear simulador temporal
             sim = LatencySimulator(latency_us=latency)
             
-            # Ejecutar simulación
-            exec_df = sim.simulate_execution(signals_df, consolidated_tape)
+            # Ejecutar simulación (REQUISITO 1: ahora retorna tuple)
+            exec_df, _ = sim.simulate_execution(signals_df, consolidated_tape, isin=None)
             
             if len(exec_df) == 0:
                 continue
@@ -455,9 +539,16 @@ class LatencySimulator:
         plt.savefig(output_path, dpi=150, bbox_inches='tight')
         print(f"  Visualización guardada: {output_path}")
         
-        plt.show(block=False)
-        plt.pause(0.1)
-        plt.close()
+        try:
+            plt.show(block=False)
+            plt.pause(0.5)  # Pausa más larga para asegurar renderizado
+            print(f"  [OK] Gráficas mostradas en ventana")
+        except Exception as e:
+            logger.warning(f"  No se pudo mostrar gráficas interactivas: {e}")
+            print(f"  [INFO] Gráficas guardadas en: {output_path}")
+        
+        # No cerrar inmediatamente para que el usuario pueda verlas
+        # plt.close()  # Comentado para permitir visualización
     
     @staticmethod
     def export_execution_results(exec_df: pd.DataFrame, 
