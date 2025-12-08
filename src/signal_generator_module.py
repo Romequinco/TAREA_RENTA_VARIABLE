@@ -201,7 +201,8 @@ class SignalGenerator:
         df['is_rising_edge'] = False
         
         # Comparar con el snapshot anterior
-        df['prev_opportunity'] = df['is_opportunity'].shift(1).fillna(False)
+        prev_opp = df['is_opportunity'].shift(1)
+        df['prev_opportunity'] = prev_opp.fillna(False).astype(bool)
         
         # Rising edge = oportunidad actual AND no había oportunidad anterior
         df['is_rising_edge'] = df['is_opportunity'] & ~df['prev_opportunity']

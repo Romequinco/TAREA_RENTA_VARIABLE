@@ -59,7 +59,7 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler(config.OUTPUT_DIR / 'arbitrage_system.log'),
+        logging.FileHandler(config.OUTPUT_DIR / 'arbitrage_system.log', encoding='utf-8'),
         logging.StreamHandler(sys.stdout)
     ]
 )
@@ -75,6 +75,12 @@ def clean_output_directories():
     print("\n" + "=" * 80)
     print("LIMPIEZA DE OUTPUTS ANTERIORES")
     print("=" * 80)
+    
+    # Cerrar todos los handlers de logging antes de eliminar archivos
+    root_logger = logging.getLogger()
+    for handler in root_logger.handlers[:]:
+        handler.close()
+        root_logger.removeHandler(handler)
     
     cleaned_files = 0
     cleaned_dirs = 0
@@ -93,11 +99,22 @@ def clean_output_directories():
                             fig_file.unlink()
                             cleaned_files += 1
             except Exception as e:
-                logger.warning(f"  No se pudo eliminar {item}: {e}")
+                print(f"  No se pudo eliminar {item}: {e}")
     
     # Asegurar que los directorios existen
     config.OUTPUT_DIR.mkdir(exist_ok=True)
     config.FIGURES_DIR.mkdir(exist_ok=True)
+    
+    # Reconfigurar logging después de limpiar
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        handlers=[
+            logging.FileHandler(config.OUTPUT_DIR / 'arbitrage_system.log', encoding='utf-8'),
+            logging.StreamHandler(sys.stdout)
+        ],
+        force=True
+    )
     
     print(f"  Archivos eliminados: {cleaned_files}")
     print(f"  [OK] Directorios de output listos para nueva ejecución")

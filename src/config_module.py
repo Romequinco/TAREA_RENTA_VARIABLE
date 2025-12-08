@@ -43,11 +43,14 @@ class Config:
     # MARKET STATUS CODES - Solo Continuous Trading
     # ========================================================================
     # Fuente: arbitrage_architecture.md - Sección 2.3
+    # NOTA: Se incluyen variantes de códigos MIC encontradas en los datos
     VALID_STATES = {
         'XMAD': [5832713, 5832756],  # BME (Bolsas y Mercados Españoles)
         'AQXE': [5308427],            # AQUIS Exchange
+        'AQEU': [5308427],            # AQUIS Exchange (variante encontrada en datos)
         'CEUX': [12255233],           # CBOE Europe
-        'TRQX': [7608181]             # Turquoise
+        'TRQX': [7608181],            # Turquoise
+        'TQEX': [7608181]             # Turquoise (variante encontrada en datos)
     }
     
     # ========================================================================

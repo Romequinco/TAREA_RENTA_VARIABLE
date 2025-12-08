@@ -15,10 +15,10 @@ En T_execution, los precios pueden haber cambiado, reduciendo o eliminando
 el profit.
 
 LATENCIAS TÍPICAS (microsegundos):
-- Co-location (mismo datacenter): 10-50 μs
-- Cross-venue (diferentes datacenters): 100-500 μs
-- HFT agresivo: 1-10 μs
-- Retail: >1000 μs
+- Co-location (mismo datacenter): 10-50 us
+- Cross-venue (diferentes datacenters): 100-500 us
+- HFT agresivo: 1-10 us
+- Retail: >1000 us
 
 PROCESO:
 1. Para cada oportunidad detectada en timestamp T
@@ -52,12 +52,12 @@ class LatencySimulator:
     def __init__(self, latency_us: int = 100):
         """
         Args:
-            latency_us: Latencia en microsegundos (default: 100 μs)
+            latency_us: Latencia en microsegundos (default: 100 us)
         """
         self.latency_us = latency_us
         self.latency_ns = latency_us * 1000  # Convertir a nanosegundos
         
-        logger.info(f"LatencySimulator initialized: latency={latency_us} μs")
+        logger.info(f"LatencySimulator initialized: latency={latency_us} us")
     
     def simulate_execution(self, 
                           signals_df: pd.DataFrame,
@@ -106,7 +106,7 @@ class LatencySimulator:
         print("\n" + "=" * 80)
         print("SIMULACIÓN DE LATENCIA (TIME MACHINE)")
         print("=" * 80)
-        print(f"  Latencia configurada: {self.latency_us} μs")
+        print(f"  Latencia configurada: {self.latency_us} us")
         
         # ====================================================================
         # PASO 1: Filtrar solo rising edges (oportunidades únicas)
@@ -335,7 +335,7 @@ class LatencySimulator:
         
         print(f"\n  PROFIT AGREGADO:")
         print(f"    - Teórico (latencia=0): €{total_theoretical:.2f}")
-        print(f"    - Real (latencia={self.latency_us}μs): €{total_real:.2f}")
+        print(f"    - Real (latencia={self.latency_us}us): €{total_real:.2f}")
         print(f"    - Pérdida por latencia: €{total_loss:.2f} ({total_loss/total_theoretical*100:.1f}%)")
         
         # Profit por oportunidad
@@ -376,12 +376,12 @@ class LatencySimulator:
         print("\n" + "=" * 80)
         print("ANÁLISIS DE SENSIBILIDAD A LATENCIA")
         print("=" * 80)
-        print(f"  Latencias a probar: {latencies_us} μs")
+        print(f"  Latencias a probar: {latencies_us} us")
         
         results = []
         
         for latency in latencies_us:
-            print(f"\n  Simulando latencia: {latency} μs...")
+            print(f"\n  Simulando latencia: {latency} us...")
             
             # Crear simulador temporal
             sim = LatencySimulator(latency_us=latency)
@@ -453,7 +453,7 @@ class LatencySimulator:
         
         ax1.set_title('Profit Retention vs Latency', 
                      fontsize=14, fontweight='bold')
-        ax1.set_xlabel('Latency (μs)')
+        ax1.set_xlabel('Latency (us)')
         ax1.set_ylabel('Profit Retention (%)')
         ax1.grid(True, alpha=0.3)
         ax1.set_xscale('log')
@@ -474,7 +474,7 @@ class LatencySimulator:
         
         ax2.set_title('Profitable Opportunities vs Latency',
                      fontsize=14, fontweight='bold')
-        ax2.set_xlabel('Latency (μs)')
+        ax2.set_xlabel('Latency (us)')
         ax2.set_ylabel('Profitable (%)')
         ax2.grid(True, alpha=0.3)
         ax2.set_xscale('log')
@@ -497,7 +497,7 @@ class LatencySimulator:
         
         ax3.set_title('Absolute Profit vs Latency',
                      fontsize=14, fontweight='bold')
-        ax3.set_xlabel('Latency (μs)')
+        ax3.set_xlabel('Latency (us)')
         ax3.set_ylabel('Total Profit (€)')
         ax3.legend()
         ax3.grid(True, alpha=0.3)
@@ -525,7 +525,7 @@ class LatencySimulator:
         ax4.set_xlabel('Latency Configuration')
         ax4.set_ylabel('Profit Loss (€)')
         ax4.set_xticks(x_positions)
-        ax4.set_xticklabels([f"{lat}μs" for lat in latencies], 
+        ax4.set_xticklabels([f"{lat}us" for lat in latencies], 
                            rotation=45, ha='right')
         ax4.grid(True, alpha=0.3, axis='y')
         

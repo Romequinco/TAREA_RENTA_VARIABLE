@@ -186,11 +186,16 @@ class DataCleaner:
         actual_codes = set(sts_df['market_trading_status'].dropna().unique())
         matching_codes = set(valid_codes).intersection(actual_codes)
         
+        # DIAGNÓSTICO: Log detallado de códigos encontrados
+        logger.info(f"    Códigos esperados para {mic}: {valid_codes}")
+        logger.info(f"    Códigos encontrados en STS: {sorted(actual_codes)}")
+        logger.info(f"    Códigos que coinciden: {sorted(matching_codes) if len(matching_codes) > 0 else 'NINGUNO'}")
+        
         if len(matching_codes) == 0:
-            logger.warning(f"    No matching trading status codes found for {mic}")
-            logger.warning(f"    Expected codes: {valid_codes}")
-            logger.warning(f"    Found codes: {sorted(actual_codes)}")
-            logger.warning(f"    Keeping all data without status filtering")
+            logger.error(f"    [CRÍTICO] No matching trading status codes found for {mic}")
+            logger.error(f"    Expected codes: {valid_codes}")
+            logger.error(f"    Found codes: {sorted(actual_codes)}")
+            logger.error(f"    [ADVERTENCIA] Keeping all data without status filtering - NO SE ESTÁN FILTRANDO DATOS NO CONTINUOS")
             return qte_df
         
         # Ordenar ambos DataFrames por timestamp
@@ -210,10 +215,35 @@ class DataCleaner:
             logger.error(f"    Error in merge_asof for {mic}: {e}")
             return qte_df
         
+        # DIAGNÓSTICO: Verificar cuántos snapshots tienen estado asignado
+        snapshots_with_status = merged['market_trading_status'].notna().sum()
+        snapshots_without_status = merged['market_trading_status'].isna().sum()
+        logger.info(f"    Snapshots con estado asignado: {snapshots_with_status:,} ({snapshots_with_status/initial_len*100:.2f}%)")
+        logger.info(f"    Snapshots sin estado asignado: {snapshots_without_status:,} ({snapshots_without_status/initial_len*100:.2f}%)")
+        
+        # CRÍTICO: Eliminar snapshots sin estado asignado (no sabemos si son continuous trading)
+        # Si no hay estado, no podemos garantizar que sea continuous trading
+        merged_with_status = merged[merged['market_trading_status'].notna()].copy()
+        
+        if len(merged_with_status) == 0:
+            logger.error(f"    [CRÍTICO] Ningún snapshot tiene estado asignado después del merge_asof para {mic}")
+            logger.error(f"    Esto puede indicar que los timestamps de QTE y STS no coinciden")
+            logger.error(f"    Manteniendo datos originales sin filtrar")
+            return qte_df
+        
         # Filtrar por códigos válidos de continuous trading
-        merged_filtered = merged[
-            merged['market_trading_status'].isin(matching_codes)
+        merged_filtered = merged_with_status[
+            merged_with_status['market_trading_status'].isin(matching_codes)
         ].copy()
+        
+        # DIAGNÓSTICO: Verificar distribución de estados
+        if 'market_trading_status' in merged_with_status.columns:
+            status_distribution = merged_with_status['market_trading_status'].value_counts()
+            logger.info(f"    Distribución de estados encontrados:")
+            for status, count in status_distribution.items():
+                is_valid = status in matching_codes
+                status_label = "[VALID]" if is_valid else "[INVALID]"
+                logger.info(f"      {status}: {count:,} snapshots ({status_label})")
         
         # Limpiar columna temporal
         if 'market_trading_status' in merged_filtered.columns:
@@ -223,13 +253,18 @@ class DataCleaner:
         
         # CORRECCIÓN: Solo aplicar filtro si no elimina TODOS los datos
         if len(merged_filtered) == 0:
-            logger.warning(f"    Status filtering would remove ALL data for {mic}")
-            logger.warning(f"    Keeping original data without status filtering")
+            logger.error(f"    [CRÍTICO] Status filtering would remove ALL data for {mic}")
+            logger.error(f"    Esto indica que ningún snapshot tiene estado de continuous trading")
+            logger.error(f"    Manteniendo datos originales sin filtrar")
             return qte_df
         
         if removed > 0:
             pct = removed / initial_len * 100
-            logger.info(f"    Removed {removed:,} non-trading snapshots ({pct:.2f}%)")
+            logger.info(f"    [OK] Removed {removed:,} non-trading snapshots ({pct:.2f}%)")
+            logger.info(f"    [OK] Kept {len(merged_filtered):,} continuous trading snapshots ({100-pct:.2f}%)")
+        else:
+            logger.warning(f"    [ADVERTENCIA] No se eliminaron snapshots - todos parecen ser continuous trading")
+            logger.warning(f"    Esto puede ser correcto o puede indicar un problema con el filtro")
         
         return merged_filtered
     

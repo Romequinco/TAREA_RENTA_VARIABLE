@@ -1,6 +1,6 @@
 # REPORTE COMPLETO - ISIN: ES0113900J37
 
-**Fecha de generación:** 2025-12-08 16:36:30
+**Fecha de generación:** 2025-12-08 17:13:42
 
 ---
 
