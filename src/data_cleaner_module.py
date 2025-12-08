@@ -92,16 +92,8 @@ class DataCleaner:
             logger.warning(f"    No se encontraron columnas de precios para filtrar magic numbers")
             return df, 0
         
-        # Crear máscara combinada: True si NO hay magic numbers en ninguna columna
-        # Optimizado: usar isin con set para O(1) lookup en lugar de loops
-        # Inicializar máscara como True (todas las filas válidas inicialmente)
-        mask = pd.Series(True, index=df.index)
-        
-        # Para cada columna de precios, eliminar filas con magic numbers
-        for col in available_cols:
-            mask &= ~df[col].isin(config.MAGIC_NUMBERS)
-        
-        # Aplicar máscara (solo copiar si es necesario modificar)
+        # Máscara vectorizada: True si NO hay magic numbers en ninguna columna
+        mask = ~df[available_cols].isin(config.MAGIC_NUMBERS).any(axis=1)
         df_clean = df[mask].copy()
         removed = initial_len - len(df_clean)
         
@@ -227,50 +219,19 @@ class DataCleaner:
             logger.error(f"    [ADVERTENCIA] Keeping all data without status filtering")
             return qte_df, 0
         
-        # ====================================================================
-        # VALIDACIÓN DEL BOOK IDENTITY KEY: (session, isin, mic, ticker)
-        # ====================================================================
-        # CRÍTICO: Asegurar que QTE y STS pertenecen al mismo order book
-        # Esto previene joins incorrectos entre diferentes sessions/isins/tickers
-        book_identity_valid = True
-        identity_fields = []
+        # Validación del Book Identity Key: (session, isin, mic, ticker)
+        identity_fields = ['mic=' + mic]
+        for field in ['session', 'isin', 'ticker']:
+            if field in qte_df.columns and field in sts_df.columns:
+                qte_val = qte_df[field].iloc[0] if len(qte_df) > 0 else None
+                sts_val = sts_df[field].iloc[0] if len(sts_df) > 0 else None
+                if qte_val != sts_val:
+                    logger.error(f"    [ERROR] Book Identity Key mismatch: {field} QTE={qte_val} != STS={sts_val}")
+                    return qte_df, 0
+                identity_fields.append(f"{field}={qte_val}")
         
-        if 'session' in qte_df.columns and 'session' in sts_df.columns:
-            qte_session = qte_df['session'].iloc[0] if len(qte_df) > 0 else None
-            sts_session = sts_df['session'].iloc[0] if len(sts_df) > 0 else None
-            if qte_session != sts_session:
-                logger.error(f"    [ERROR] Book Identity Key mismatch: session QTE={qte_session} != STS={sts_session}")
-                book_identity_valid = False
-            else:
-                identity_fields.append(f"session={qte_session}")
-        
-        if 'isin' in qte_df.columns and 'isin' in sts_df.columns:
-            qte_isin = qte_df['isin'].iloc[0] if len(qte_df) > 0 else None
-            sts_isin = sts_df['isin'].iloc[0] if len(sts_df) > 0 else None
-            if qte_isin != sts_isin:
-                logger.error(f"    [ERROR] Book Identity Key mismatch: isin QTE={qte_isin} != STS={sts_isin}")
-                book_identity_valid = False
-            else:
-                identity_fields.append(f"isin={qte_isin}")
-        
-        if 'ticker' in qte_df.columns and 'ticker' in sts_df.columns:
-            qte_ticker = qte_df['ticker'].iloc[0] if len(qte_df) > 0 else None
-            sts_ticker = sts_df['ticker'].iloc[0] if len(sts_df) > 0 else None
-            if qte_ticker != sts_ticker:
-                logger.error(f"    [ERROR] Book Identity Key mismatch: ticker QTE={qte_ticker} != STS={sts_ticker}")
-                book_identity_valid = False
-            else:
-                identity_fields.append(f"ticker={qte_ticker}")
-        
-        # mic ya está validado implícitamente (se pasa como parámetro)
-        identity_fields.append(f"mic={mic}")
-        
-        if book_identity_valid and len(identity_fields) > 1:
-            logger.info(f"    [OK] Book Identity Key validado: ({', '.join(identity_fields)})")
-        elif not book_identity_valid:
-            logger.error(f"    [CRÍTICO] Book Identity Key no coincide - abortando join QTE-STS")
-            logger.error(f"    Esto podría causar joins incorrectos entre diferentes order books")
-            return qte_df  # Retornar QTE sin filtrar por status si hay mismatch
+        if len(identity_fields) > 1:
+            logger.debug(f"    Book Identity Key validado: ({', '.join(identity_fields)})")
         
         # Optimización: Solo ordenar si no está ya ordenado
         if not qte_df['epoch'].is_monotonic_increasing:

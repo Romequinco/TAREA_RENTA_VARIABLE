@@ -1,2 +1,0 @@
-epoch,execution_epoch,venue_max_bid,venue_min_ask,execution_bid,execution_ask,theoretical_profit,real_profit,executed_qty,total_profit,real_total_profit,profit_category
-1762522600000000,1762522600100000,XMAD,AQEU,4.929999828338623,4.989999771118164,0.010000228881835938,-0.059999942779541016,0.0,0.0,-0.0,Loss

@@ -1,2 +1,0 @@
-epoch,signal,is_opportunity,max_bid,min_ask,global_max_bid,global_min_ask,venue_max_bid,venue_min_ask,max_bid_venue,min_ask_venue,bid_qty,ask_qty,max_bid_qty,min_ask_qty,executable_qty,tradeable_qty,theoretical_profit,total_profit,is_rising_edge,remaining_bid_qty,remaining_ask_qty
-1762525800000000,1,True,6.369999885559082,6.360000133514404,6.369999885559082,6.360000133514404,TQEX,XMAD,TQEX,XMAD,146.0,568.0,146.0,568.0,146.0,146.0,0.009999752044677734,1.4599637985229492,True,146.0,568.0

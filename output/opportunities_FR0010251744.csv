@@ -1,3 +1,0 @@
-epoch,signal,is_opportunity,max_bid,min_ask,global_max_bid,global_min_ask,venue_max_bid,venue_min_ask,max_bid_venue,min_ask_venue,bid_qty,ask_qty,max_bid_qty,min_ask_qty,executable_qty,tradeable_qty,theoretical_profit,total_profit,is_rising_edge,remaining_bid_qty,remaining_ask_qty
-1762503200000000,1,True,168.83999633789062,168.82000732421875,168.83999633789062,168.82000732421875,XMAD,AQEU,XMAD,AQEU,1200.0,148.0,1200.0,148.0,148.0,148.0,0.019989013671875,2.9583740234375,True,1200.0,148.0
-1762503800000000,1,True,168.5800018310547,168.5,168.5800018310547,168.5,AQEU,XMAD,AQEU,XMAD,148.0,1200.0,148.0,1200.0,148.0,148.0,0.0800018310546875,11.84027099609375,True,148.0,1200.0

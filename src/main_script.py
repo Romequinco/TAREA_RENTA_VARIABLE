@@ -8,8 +8,13 @@ Orquesta el pipeline completo:
 2. Limpieza y validación (DataCleaner)
 3. Consolidated Tape (ConsolidatedTape) - OPTIMIZADO
 4. Detección de señales (SignalGenerator)
-5. Simulación de latencia (próximo módulo)
+5. Ejecución instantánea (latencia=0, sin comisiones)
 6. Análisis y visualizaciones
+
+ASUNCIONES DEL MODELO:
+- Latencia = 0 (ejecución instantánea)
+- Sin comisiones de mercado
+- Profit teórico = Profit real
 
 Uso:
     python main.py --data-dir DATA_SMALL --isin <ISIN> --visualize
@@ -51,7 +56,8 @@ from data_loader_module import DataLoader
 from data_cleaner_module import DataCleaner
 from consolidator_module import ConsolidatedTape
 from signal_generator_module import SignalGenerator
-from latency_simulator_module import LatencySimulator
+# LatencySimulator no se usa - asumimos latencia = 0 y ejecución instantánea
+# from latency_simulator_module import LatencySimulator
 from analyzer_module import ArbitrageAnalyzer
 
 # Configurar logging
@@ -154,18 +160,24 @@ def generate_complete_markdown_report(isin: str, consolidated_tape, signals_df, 
     doc_lines.append(f"- **ISIN:** {isin}")
     doc_lines.append(f"- **Total snapshots:** {len(consolidated_tape):,}")
     doc_lines.append(f"- **Venues incluidos:** {len(clean_data)}")
+    doc_lines.append("")
+    doc_lines.append("**ASUNCIONES DEL MODELO:**")
+    doc_lines.append("- Latencia = 0 (ejecución instantánea)")
+    doc_lines.append("- Sin comisiones de mercado")
+    doc_lines.append("- Profit teórico = Profit real")
+    doc_lines.append("")
     
     if signals_df is not None and len(signals_df) > 0:
         total_opps = signals_df['is_rising_edge'].sum()
         total_profit = signals_df[signals_df['is_rising_edge']]['total_profit'].sum()
         doc_lines.append(f"- **Oportunidades detectadas:** {total_opps:,}")
-        doc_lines.append(f"- **Profit teórico total:** €{total_profit:,.2f}")
+        doc_lines.append(f"- **Profit total (ejecución instantánea):** €{total_profit:,.2f}")
     
     if exec_df is not None and len(exec_df) > 0:
-        profitable = (exec_df['profit_category'] == 'Profitable').sum()
+        profitable = len(exec_df)  # Todas son profitable (sin latencia ni comisiones)
         real_profit = exec_df['real_total_profit'].sum()
-        doc_lines.append(f"- **Oportunidades profitable:** {profitable:,}")
-        doc_lines.append(f"- **Profit real total:** €{real_profit:,.2f}")
+        doc_lines.append(f"- **Oportunidades ejecutadas:** {profitable:,}")
+        doc_lines.append(f"- **Profit real total (ejecución instantánea):** €{real_profit:,.2f}")
     
     if roi_metrics:
         doc_lines.append(f"- **ROI estimado:** {roi_metrics.get('roi_pct', 0):.4f}%")
@@ -192,11 +204,13 @@ def generate_complete_markdown_report(isin: str, consolidated_tape, signals_df, 
                 doc_lines.append("```")
             doc_lines.append("")
     
-    # Tabla de trades ejecutados
+    # Tabla de trades ejecutados (todos son profitable porque latencia=0 y sin comisiones)
     if exec_df is not None and len(exec_df) > 0:
         doc_lines.append("## TABLA DE TRADES EJECUTADOS")
         doc_lines.append("")
-        profitable_trades = exec_df[exec_df['profit_category'] == 'Profitable'].copy()
+        doc_lines.append("*Nota: Todas las oportunidades son ejecutables instantáneamente (latencia=0, sin comisiones)*")
+        doc_lines.append("")
+        profitable_trades = exec_df.copy()  # Todas son profitable
         if len(profitable_trades) > 0:
             trade_cols = ['epoch', 'execution_epoch', 'venue_max_bid', 'venue_min_ask',
                          'executed_qty', 'real_profit', 'real_total_profit', 'profit_category']
@@ -253,7 +267,7 @@ def generate_complete_markdown_report(isin: str, consolidated_tape, signals_df, 
     figure_files = [
         config.FIGURES_DIR / f'consolidated_tape_{isin}.png',
         config.FIGURES_DIR / f'signals_{isin}.png',
-        config.FIGURES_DIR / f'latency_impact_{isin}.png'
+        # config.FIGURES_DIR / f'latency_impact_{isin}.png'  # No se genera - sin simulación de latencia
     ]
     
     for fig_file in figure_files:
@@ -475,37 +489,25 @@ def main():
             isin=test_isin
         )
         
-        # Mostrar resumen de oportunidades detectadas
+        # Resumen y análisis
         if signals_df is not None and len(signals_df) > 0:
-            rising_edges = signals_df[signals_df['is_rising_edge']].copy()
+            rising_edges = signals_df[signals_df['is_rising_edge']]
             if len(rising_edges) > 0:
-                print(f"\n  [RESUMEN DE OPORTUNIDADES DETECTADAS]")
+                print(f"\n  [RESUMEN] {len(rising_edges):,} oportunidades detectadas")
                 summary_cols = ['epoch', 'venue_max_bid', 'venue_min_ask', 
                               'executable_qty', 'theoretical_profit', 'total_profit']
-                available_summary_cols = [c for c in summary_cols if c in rising_edges.columns]
-                display_dataframe(
-                    rising_edges[available_summary_cols].head(10),
-                    f"Primeras 10 Oportunidades (de {len(rising_edges)} totales)",
-                    max_rows=10
-                )
-        
-        # Analizar pares de venues
-        print("\n  [ANÁLISIS DE PARES DE VENUES]")
-        venue_pairs = signal_gen.analyze_venue_pairs(signals_df)
-        if venue_pairs is not None and len(venue_pairs) > 0:
-            display_dataframe(venue_pairs, "Top Pares de Venues por Profit", max_rows=10)
-        
-        # Visualizar señales (se mostrará automáticamente)
-        print("\n  [GENERANDO VISUALIZACIÓN DE SEÑALES]")
-        signal_gen.visualize_signals(signals_df, test_isin)
-        print("  [OK] Gráficas de señales generadas y mostradas")
-        
-        # Exportar oportunidades
-        print("\n  [EXPORTANDO OPORTUNIDADES]")
-        signal_gen.export_opportunities(
-            signals_df,
-            output_path=config.OUTPUT_DIR / f"opportunities_{test_isin}.csv"
-        )
+                available_cols = [c for c in summary_cols if c in rising_edges.columns]
+                display_dataframe(rising_edges[available_cols].head(10), 
+                                f"Primeras 10 Oportunidades", max_rows=10)
+            
+            # Análisis y exportación
+            venue_pairs = signal_gen.analyze_venue_pairs(signals_df)
+            if venue_pairs is not None and len(venue_pairs) > 0:
+                display_dataframe(venue_pairs, "Top Pares de Venues", max_rows=10)
+            
+            signal_gen.visualize_signals(signals_df, test_isin)
+            signal_gen.export_opportunities(signals_df, 
+                                           output_path=config.OUTPUT_DIR / f"opportunities_{test_isin}.csv")
         
     except Exception as e:
         logger.error(f"[ERROR] Error en detección de señales: {e}")
@@ -517,69 +519,31 @@ def main():
         executed_trades = []
     
     # ========================================================================
-    # FASE 5: SIMULACIÓN DE LATENCIA
+    # FASE 5: EJECUCIÓN INSTANTÁNEA (LATENCIA = 0, SIN COMISIONES)
     # ========================================================================
     print("\n" + "=" * 80)
-    print("FASE 5: SIMULACIÓN DE LATENCIA")
+    print("FASE 5: EJECUCIÓN INSTANTÁNEA")
     print("=" * 80)
     
     exec_df = None
-    try:
-        if signals_df is not None and len(signals_df) > 0:
-            sim = LatencySimulator(latency_us=100)
+    if signals_df is not None and len(signals_df) > 0:
+        rising_edges = signals_df[signals_df['is_rising_edge']]
+        if len(rising_edges) > 0:
+            exec_df = rising_edges.copy()
+            exec_df['execution_epoch'] = exec_df['epoch']
+            exec_df['executed_qty'] = exec_df['executable_qty']
+            exec_df['real_profit'] = exec_df['theoretical_profit']
+            exec_df['real_total_profit'] = exec_df['total_profit']
+            exec_df['profit_category'] = 'Profitable'
             
-            # REQUISITO 1: simulate_execution ahora retorna (DataFrame, executed_trades_list)
-            print("\n  [SIMULANDO EJECUCIÓN CON LATENCIA]")
-            exec_df, new_executed_trades = sim.simulate_execution(
-                signals_df,
-                consolidated_tape,
-                isin=test_isin
+            print(f"  Oportunidades ejecutables: {len(exec_df):,}")
+            print(f"  Profit total: €{exec_df['real_total_profit'].sum():,.2f}")
+            
+            exec_cols = ['epoch', 'execution_epoch', 'venue_max_bid', 'venue_min_ask',
+                        'executed_qty', 'real_profit', 'real_total_profit', 'profit_category']
+            exec_df[[c for c in exec_cols if c in exec_df.columns]].to_csv(
+                config.OUTPUT_DIR / f"execution_{test_isin}.csv", index=False
             )
-            
-            # REQUISITO 1: Actualizar lista de trades ejecutados
-            executed_trades.extend(new_executed_trades)
-            
-            # Mostrar resumen de ejecuciones
-            if exec_df is not None and len(exec_df) > 0:
-                profitable = exec_df[exec_df['profit_category'] == 'Profitable'].copy()
-                if len(profitable) > 0:
-                    print(f"\n  [RESUMEN DE EJECUCIONES PROFITABLES]")
-                    exec_summary_cols = ['epoch', 'execution_epoch', 'venue_max_bid', 'venue_min_ask',
-                                        'executed_qty', 'real_profit', 'real_total_profit', 'profit_category']
-                    available_exec_cols = [c for c in exec_summary_cols if c in profitable.columns]
-                    display_dataframe(
-                        profitable[available_exec_cols].head(10),
-                        f"Primeras 10 Ejecuciones Profitable (de {len(profitable)} totales)",
-                        max_rows=10
-                    )
-            
-            # Análisis de sensibilidad
-            print("\n  [ANÁLISIS DE SENSIBILIDAD A LATENCIA]")
-            sensitivity_df = sim.sensitivity_analysis(
-                signals_df,
-                consolidated_tape,
-                latencies_us=[10, 50, 100, 200, 500, 1000]
-            )
-            if sensitivity_df is not None and len(sensitivity_df) > 0:
-                display_dataframe(sensitivity_df, "Sensibilidad a Diferentes Latencias", max_rows=10)
-            
-            # Visualizar impacto de latencia (se mostrará automáticamente)
-            print("\n  [GENERANDO VISUALIZACIÓN DE IMPACTO DE LATENCIA]")
-            sim.visualize_latency_impact(sensitivity_df, test_isin)
-            print("  [OK] Gráficas de impacto de latencia generadas y mostradas")
-            
-            # Exportar resultados de ejecución
-            print("\n  [EXPORTANDO RESULTADOS DE EJECUCIÓN]")
-            sim.export_execution_results(
-                exec_df,
-                output_path=config.OUTPUT_DIR / f"execution_{test_isin}.csv"
-            )
-        else:
-            print("  [SKIP] No hay señales para simular latencia")
-    except Exception as e:
-        logger.error(f"[ERROR] Error en simulación de latencia: {e}")
-        import traceback
-        logger.debug(traceback.format_exc())
     
     # ========================================================================
     # FASE 6: ANÁLISIS FINAL
@@ -598,7 +562,8 @@ def main():
             metrics = analyzer.analyze_opportunities(signals_df, exec_df)
             
             print("\n  [ESTIMANDO ROI]")
-            roi_metrics = analyzer.estimate_roi(metrics, trading_costs_bps=0.5, capital_eur=100000)
+            # Sin comisiones: trading_costs_bps = 0
+            roi_metrics = analyzer.estimate_roi(metrics, trading_costs_bps=0.0, capital_eur=100000)
             
             # Mostrar métricas
             if metrics:
@@ -643,17 +608,17 @@ def main():
         total_profit = signals_df[signals_df['is_rising_edge']]['total_profit'].sum()
         
         print(f"  - Oportunidades detectadas: {total_opportunities:,}")
-        print(f"  - Profit teórico total (latencia=0): €{total_profit:.2f}")
+        print(f"  - Profit total (ejecución instantánea, sin comisiones): €{total_profit:.2f}")
         
         if total_opportunities > 0:
             avg_profit = signals_df[signals_df['is_rising_edge']]['total_profit'].mean()
             print(f"  - Profit medio por oportunidad: €{avg_profit:.2f}")
     
     if exec_df is not None and len(exec_df) > 0:
-        profitable_ops = (exec_df['profit_category'] == 'Profitable').sum()
+        profitable_ops = len(exec_df)  # Todas son profitable (sin latencia ni comisiones)
         real_profit = exec_df['real_total_profit'].sum()
-        print(f"  - Oportunidades profitable (con latencia): {profitable_ops:,}")
-        print(f"  - Profit real total (con latencia): €{real_profit:.2f}")
+        print(f"  - Oportunidades ejecutadas: {profitable_ops:,}")
+        print(f"  - Profit real total (ejecución instantánea): €{real_profit:.2f}")
     
     if roi_metrics:
         print(f"  - ROI estimado: {roi_metrics.get('roi_pct', 0):.4f}%")

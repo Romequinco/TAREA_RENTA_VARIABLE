@@ -194,67 +194,30 @@ class ConsolidatedTape:
             logger.error("  No hay venues preparados para consolidar")
             return None
         
-        # PASO 2: Merge iterativo
-        # Estrategia: usar merge_asof si hay redondeo temporal (más eficiente),
-        # sino usar outer merge según especificaciones
+        # PASO 2: Merge iterativo optimizado
+        sorted_venues = sorted(prepared_venues.items(), key=lambda x: len(x[1]), reverse=True)
+        base_venue_name, consolidated = sorted_venues[0]
+        print(f"\n  Usando {base_venue_name} como base ({len(consolidated):,} rows)")
         
-        if self.time_bin_ns is not None:
-            # Estrategia optimizada: merge_asof incremental
-            sorted_venues = sorted(
-                prepared_venues.items(), 
-                key=lambda x: len(x[1]), 
-                reverse=True
-            )
-            
-            base_venue_name, consolidated = sorted_venues[0]
-            print(f"\n  Usando {base_venue_name} como base ({len(consolidated):,} rows)")
-            print(f"  Ejecutando merge_asof incremental...")
-            
-            for venue_name, venue_df in sorted_venues[1:]:
-                print(f"    Merging con {venue_name}... ", end='')
-                try:
+        for venue_name, venue_df in sorted_venues[1:]:
+            print(f"    Merging con {venue_name}... ", end='')
+            try:
+                if self.time_bin_ns is not None:
                     consolidated = pd.merge_asof(
                         consolidated.sort_values('epoch'),
                         venue_df.sort_values('epoch'),
                         on='epoch',
-                        direction='backward',  # REQUISITO: backward para propagar último valor conocido
+                        direction='backward',
                         tolerance=self.time_bin_ns
                     )
-                    print(f"OK ({len(consolidated):,} rows)")
-                except Exception as e:
-                    logger.error(f"Error merging {venue_name}: {e}")
-                    print(f"ERROR")
-                    continue
-        else:
-            # Estrategia según especificaciones: outer merge iterativo
-            print(f"\n  Ejecutando outer merge iterativo...")
-            
-            sorted_venues = sorted(
-                prepared_venues.items(), 
-                key=lambda x: len(x[1]), 
-                reverse=True
-            )
-            
-            base_venue_name, consolidated = sorted_venues[0]
-            print(f"  Usando {base_venue_name} como base ({len(consolidated):,} rows)")
-            
-            for venue_name, venue_df in sorted_venues[1:]:
-                print(f"    Merging con {venue_name}... ", end='')
-                try:
-                    consolidated = pd.merge(
-                        consolidated,
-                        venue_df,
-                        on='epoch',
-                        how='outer',
-                        suffixes=('', '_dup')
-                    )
-                    # Eliminar columnas duplicadas si las hay
+                else:
+                    consolidated = pd.merge(consolidated, venue_df, on='epoch', how='outer')
                     consolidated = consolidated.loc[:, ~consolidated.columns.str.endswith('_dup')]
-                    print(f"OK ({len(consolidated):,} rows)")
-                except Exception as e:
-                    logger.error(f"Error merging {venue_name}: {e}")
-                    print(f"ERROR")
-                    continue
+                print(f"OK ({len(consolidated):,} rows)")
+            except Exception as e:
+                logger.error(f"Error merging {venue_name}: {e}")
+                print(f"ERROR")
+                continue
         
         # PASO 3: Ordenar por timestamp
         consolidated = consolidated.sort_values('epoch').reset_index(drop=True)
@@ -286,25 +249,10 @@ class ConsolidatedTape:
         nans_after = consolidated.isna().sum().sum()
         print(f"    NaNs después: {nans_after:,}")
         
-        # CRÍTICO: Verificar que forward fill funcionó
-        # Si todavía hay NaNs después de forward fill, puede ser porque:
-        # 1. Las primeras filas tienen NaNs (no hay valores previos para propagar)
-        # 2. Hay un problema con el forward fill
-        if nans_after > nans_before:
-            logger.error(f"  ⚠️ CRÍTICO: NaNs aumentaron después de forward fill (antes: {nans_before}, después: {nans_after})")
-        elif nans_after == nans_before and nans_before > 0:
-            logger.warning(f"  ⚠️ ADVERTENCIA: Forward fill no eliminó NaNs (quedan {nans_after:,})")
-            logger.warning(f"    Esto puede causar pérdida de señales - verificando...")
-            
-            # Intentar backward fill para las primeras filas si es necesario
-            if nans_after > 0:
-                # Backward fill solo para las primeras filas que tienen NaN
-                # Esto propaga el primer valor conocido hacia atrás
-                consolidated = consolidated.bfill(limit=None)
-                nans_after_bfill = consolidated.isna().sum().sum()
-                if nans_after_bfill < nans_after:
-                    logger.info(f"    Backward fill eliminó {nans_after - nans_after_bfill:,} NaNs adicionales")
-                    nans_after = nans_after_bfill
+        # Intentar backward fill si quedan NaNs (solo primeras filas)
+        if nans_after > 0:
+            consolidated = consolidated.bfill(limit=None)
+            nans_after = consolidated.isna().sum().sum()
         
         # PASO 5: Eliminar primeras filas con NaNs
         # CRÍTICO: Solo eliminar filas donde TODOS los venues tienen NaN
