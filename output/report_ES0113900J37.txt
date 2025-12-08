@@ -1,14 +1,8 @@
 ================================================================================
-REPORTE DE ANÁLISIS DE ARBITRAJE - MERCADOS FRAGMENTADOS EUROPEOS
+REPORTE DE ANÁLISIS DE ARBITRAJE
 ================================================================================
-Fecha de generación: 2025-12-08 17:13:42
+Fecha: 2025-12-08 18:28:55
 
-[1] MÉTRICAS DE DETECCIÓN
---------------------------------------------------------------------------------
-Total snapshots analizados: 307
-Snapshots con arbitraje: 0 (0.0000%)
-Oportunidades válidas: 0 (0.0000%)
-
-================================================================================
-[FIN DEL REPORTE]
-================================================================================
+Oportunidades válidas: 2
+Profit teórico: €13.29
+Profit real: €0.00

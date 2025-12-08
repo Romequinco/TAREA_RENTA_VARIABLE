@@ -1,26 +1,27 @@
 """
-FALTA AÑADIR AL MAIN SCRIPT.
-
 ================================================================================
-analyzer.py - Módulo de Análisis y Métricas de Performance
+analyzer.py - Módulo de Análisis y Métricas de Performance (OPTIMIZADO)
 ================================================================================
 
 OBJETIVO:
-Generar el análisis final y métricas de performance del sistema de arbitraje.
+Generar métricas agregadas y estadísticas descriptivas que respondan las tres
+preguntas del ejercicio:
 
-MÉTRICAS CLAVE:
-1. Profit total y medio por oportunidad
-2. Tasa de éxito (% oportunidades profitable después de latencia)
-3. Distribución temporal de oportunidades
-4. Análisis por par de venues
-5. Estadísticas de spreads y precios
-6. ROI estimado considerando costes
+1. ¿Existen oportunidades de arbitraje?
+2. ¿Cuál es el profit teórico máximo?
+3. ¿Cómo decae el profit con la latencia?
 
-OUTPUTS:
-- Tablas resumen
-- Métricas agregadas
-- Estadísticas descriptivas
-- Datos para visualizaciones
+FUNCIONES PRINCIPALES:
+- generate_isin_summary: Resumen por ISIN
+- create_money_table: Tabla pivote con ISINs y latencias
+- calculate_decay_curve: Curva de decay agregada
+- identify_top_opportunities: Top oportunidades individuales
+
+OPTIMIZACIONES APLICADAS:
+- Agregaciones eficientes con pandas
+- Validaciones y sanity checks integrados
+- Formateo optimizado para presentación
+- Compatibilidad con código existente
 
 ================================================================================
 """
@@ -39,13 +40,405 @@ logger = logging.getLogger(__name__)
 class ArbitrageAnalyzer:
     """
     Analiza resultados del sistema de arbitraje y genera métricas.
+    
+    Responde las tres preguntas clave:
+    1. ¿Existen oportunidades de arbitraje?
+    2. ¿Cuál es el profit teórico máximo?
+    3. ¿Cómo decae el profit con la latencia?
     """
     
     def __init__(self):
-        """
-        Inicializa el analizador.
-        """
+        """Inicializa el analizador."""
         logger.info("ArbitrageAnalyzer initialized")
+    
+    @staticmethod
+    def generate_isin_summary(signals_dict: Dict[str, pd.DataFrame],
+                              latency_results_dict: Dict[str, pd.DataFrame]) -> pd.DataFrame:
+        """
+        Genera resumen por ISIN con métricas clave.
+        
+        Input:
+          - signals_dict: Dict[isin] -> DataFrame de señales
+          - latency_results_dict: Dict[isin] -> DataFrame de resultados por latencia
+        
+        Output: DataFrame con columnas:
+                [isin, ticker, total_opportunities, theoretical_profit_0lat,
+                 actual_profit_100us, actual_profit_1ms, actual_profit_10ms,
+                 actual_profit_100ms, best_venue_pair, avg_opportunity_duration]
+        
+        Args:
+            signals_dict: Dict con señales por ISIN
+            latency_results_dict: Dict con resultados de latencia por ISIN
+            
+        Returns:
+            DataFrame con resumen por ISIN
+        """
+        print("\n" + "=" * 80)
+        print("GENERANDO RESUMEN POR ISIN")
+        print("=" * 80)
+        
+        summaries = []
+        
+        for isin, signals_df in signals_dict.items():
+            if signals_df is None or len(signals_df) == 0:
+                continue
+            
+            # Extraer ticker si está disponible
+            ticker = signals_df.get('ticker', pd.Series([None])).iloc[0] if 'ticker' in signals_df.columns else None
+            
+            # Total oportunidades (rising edges)
+            rising_edges = signals_df[signals_df.get('is_rising_edge', False)]
+            total_opportunities = len(rising_edges)
+            
+            if total_opportunities == 0:
+                continue
+            
+            # Profit teórico (latencia = 0)
+            theoretical_profit_0lat = rising_edges['total_profit'].sum()
+            
+            # Obtener resultados de latencia para este ISIN
+            latency_results = latency_results_dict.get(isin, pd.DataFrame())
+            
+            # Extraer profits por latencia específica (optimizado con dict lookup O(1))
+            # Crear diccionario latencia -> profit para búsqueda rápida
+            latency_profits = {}
+            if len(latency_results) > 0:
+                # Iterar una sola vez y crear mapa de latencias
+                for _, row in latency_results.iterrows():
+                    latency = row.get('latency_us', 0)
+                    profit = row.get('total_actual_profit', 0.0)
+                    latency_profits[latency] = profit
+            
+            # Extraer profits para latencias específicas (usando dict.get para evitar KeyError)
+            actual_profit_100us = latency_profits.get(100, 0.0)      # 0.1ms
+            actual_profit_1ms = latency_profits.get(1000, 0.0)       # 1ms
+            actual_profit_10ms = latency_profits.get(10000, 0.0)    # 10ms
+            actual_profit_100ms = latency_profits.get(100000, 0.0)  # 100ms
+            
+            # Mejor par de venues
+            if 'venue_max_bid' in rising_edges.columns and 'venue_min_ask' in rising_edges.columns:
+                venue_pairs = (
+                    'Buy@' + rising_edges['venue_min_ask'].astype(str) + 
+                    ' / Sell@' + rising_edges['venue_max_bid'].astype(str)
+                )
+                best_venue_pair = venue_pairs.value_counts().index[0] if len(venue_pairs) > 0 else 'N/A'
+            else:
+                best_venue_pair = 'N/A'
+            
+            # Duración promedio de oportunidades
+            # Calcular duración estimada basada en la frecuencia de oportunidades
+            if 'epoch' in rising_edges.columns and len(rising_edges) > 1:
+                epochs = rising_edges['epoch'].sort_values()
+                time_diffs = epochs.diff().dropna()
+                avg_opportunity_duration = time_diffs.mean() / 1e9  # Convertir a segundos
+            else:
+                avg_opportunity_duration = 0.0
+            
+            summaries.append({
+                'isin': isin,
+                'ticker': ticker,
+                'total_opportunities': total_opportunities,
+                'theoretical_profit_0lat': theoretical_profit_0lat,
+                'actual_profit_100us': actual_profit_100us,
+                'actual_profit_1ms': actual_profit_1ms,
+                'actual_profit_10ms': actual_profit_10ms,
+                'actual_profit_100ms': actual_profit_100ms,
+                'best_venue_pair': best_venue_pair,
+                'avg_opportunity_duration': avg_opportunity_duration
+            })
+        
+        summary_df = pd.DataFrame(summaries)
+        
+        if len(summary_df) > 0:
+            print(f"\n  Resumen generado para {len(summary_df)} ISINs")
+            print(summary_df.to_string(index=False))
+        else:
+            print("  No hay datos para generar resumen")
+        
+        return summary_df
+    
+    @staticmethod
+    def create_money_table(latency_results_dict: Dict[str, pd.DataFrame]) -> pd.DataFrame:
+        """
+        Tabla pivote con ISINs en filas y latencias en columnas.
+        
+        Formato:
+                 0µs     100µs   1ms    10ms   100ms
+        ISIN_A   1234€   1100€   890€   320€   45€
+        ISIN_B   567€    520€    410€   120€   12€
+        ...
+        TOTAL    5678€   5123€   3456€  980€   123€
+        
+        Args:
+            latency_results_dict: Dict[isin] -> DataFrame de resultados por latencia
+            
+        Returns:
+            DataFrame formateado para presentación
+        """
+        print("\n" + "=" * 80)
+        print("CREANDO MONEY TABLE")
+        print("=" * 80)
+        
+        # Latencias estándar para columnas
+        latency_columns = [0, 100, 500, 1000, 2000, 5000, 10000, 50000, 100000]
+        latency_labels = ['0µs', '100µs', '500µs', '1ms', '2ms', '5ms', '10ms', '50ms', '100ms']
+        
+        money_data = []
+        
+        for isin, latency_df in latency_results_dict.items():
+            if latency_df is None or len(latency_df) == 0:
+                continue
+            
+            # Crear diccionario de latencia -> profit para lookup rápido
+            latency_profit_map = dict(zip(
+                latency_df['latency_us'],
+                latency_df['total_actual_profit']
+            ))
+            
+            row = {'ISIN': isin}
+            
+            for latency, label in zip(latency_columns, latency_labels):
+                row[label] = latency_profit_map.get(latency, 0.0)
+            
+            money_data.append(row)
+        
+        if not money_data:
+            print("  No hay datos para crear money table")
+            return pd.DataFrame()
+        
+        money_df = pd.DataFrame(money_data)
+        
+        # Añadir fila TOTAL (calcular antes de formatear)
+        total_row = {'ISIN': 'TOTAL'}
+        for col in latency_labels:
+            if col in money_df.columns:
+                total_row[col] = money_df[col].sum()
+        
+        # Formatear valores como euros (mantener valores numéricos para TOTAL)
+        money_df_formatted = money_df.copy()
+        for col in latency_labels:
+            if col in money_df_formatted.columns:
+                money_df_formatted[col] = money_df_formatted[col].apply(
+                    lambda x: f'€{x:,.2f}' if pd.notna(x) else '€0.00'
+                )
+        
+        # Añadir fila TOTAL formateada
+        total_row_formatted = {'ISIN': 'TOTAL'}
+        for col in latency_labels:
+            if col in total_row:
+                total_row_formatted[col] = f'€{total_row[col]:,.2f}'
+        
+        money_df_formatted = pd.concat(
+            [money_df_formatted, pd.DataFrame([total_row_formatted])], 
+            ignore_index=True
+        )
+        
+        print(f"\n  Money Table generada:")
+        print(money_df_formatted.to_string(index=False))
+        
+        return money_df_formatted
+    
+    @staticmethod
+    def calculate_decay_curve(latency_results_dict: Dict[str, pd.DataFrame]) -> pd.DataFrame:
+        """
+        Agrega todos los ISINs para obtener la curva global de decay.
+        
+        Output: DataFrame con columnas:
+                [latency_us, total_profit, profit_pct_of_theoretical,
+                 opportunities_still_profitable]
+        
+        Args:
+            latency_results_dict: Dict[isin] -> DataFrame de resultados por latencia
+            
+        Returns:
+            DataFrame con curva de decay agregada
+        """
+        print("\n" + "=" * 80)
+        print("CALCULANDO CURVA DE DECAY")
+        print("=" * 80)
+        
+        # Agregar todos los resultados por latencia
+        all_results = []
+        
+        for isin, latency_df in latency_results_dict.items():
+            if latency_df is None or len(latency_df) == 0:
+                continue
+            
+            all_results.append(latency_df)
+        
+        if not all_results:
+            print("  No hay datos para calcular curva de decay")
+            return pd.DataFrame()
+        
+        combined_df = pd.concat(all_results, ignore_index=True)
+        
+        # Agrupar por latencia y agregar
+        decay_curve = combined_df.groupby('latency_us').agg({
+            'total_theoretical_profit': 'sum',
+            'total_actual_profit': 'sum',
+            'total_opportunities': 'sum',
+            'profit_capture_rate': 'mean'  # Promedio ponderado sería mejor, pero promedio es más simple
+        }).reset_index()
+        
+        # Calcular porcentaje del teórico
+        decay_curve['profit_pct_of_theoretical'] = (
+            (decay_curve['total_actual_profit'] / decay_curve['total_theoretical_profit'] * 100)
+            .fillna(0.0)
+        )
+        
+        # Renombrar columnas
+        decay_curve = decay_curve.rename(columns={
+            'total_actual_profit': 'total_profit',
+            'total_opportunities': 'opportunities_still_profitable'
+        })
+        
+        # Seleccionar columnas según especificaciones
+        output_cols = [
+            'latency_us', 'total_profit', 'profit_pct_of_theoretical',
+            'opportunities_still_profitable'
+        ]
+        
+        decay_curve = decay_curve[output_cols].copy()
+        decay_curve = decay_curve.sort_values('latency_us')
+        
+        print(f"\n  Curva de decay generada:")
+        print(decay_curve.to_string(index=False))
+        
+        return decay_curve
+    
+    @staticmethod
+    def identify_top_opportunities(signals_dict: Dict[str, pd.DataFrame],
+                                  n: int = 5) -> pd.DataFrame:
+        """
+        Identifica las N oportunidades individuales más rentables.
+        
+        Output: DataFrame con columnas:
+                [isin, epoch, datetime, max_bid_venue, min_ask_venue,
+                 spread_bps, theoretical_profit, tradeable_qty]
+        
+        SANITY CHECKS:
+        - Spread en basis points (bps) debe ser razonable (<50 bps)
+        - Cantidades deben ser realistas (100-10000 shares típicamente)
+        - Venues deben ser diferentes
+        - Timestamps deben estar en horario de trading (09:00-17:30 CET)
+        
+        Args:
+            signals_dict: Dict[isin] -> DataFrame de señales
+            n: Número de top oportunidades a identificar
+            
+        Returns:
+            DataFrame con top oportunidades
+        """
+        print("\n" + "=" * 80)
+        print(f"IDENTIFICANDO TOP {n} OPORTUNIDADES")
+        print("=" * 80)
+        
+        all_opportunities = []
+        
+        for isin, signals_df in signals_dict.items():
+            if signals_df is None or len(signals_df) == 0:
+                continue
+            
+            # Filtrar solo rising edges válidos
+            rising_edges = signals_df[
+                (signals_df.get('is_rising_edge', False)) &
+                (signals_df.get('total_profit', 0) > 0)
+            ].copy()
+            
+            if len(rising_edges) == 0:
+                continue
+            
+            # Añadir ISIN
+            rising_edges['isin'] = isin
+            
+            # Convertir epoch a datetime
+            rising_edges['datetime'] = pd.to_datetime(rising_edges['epoch'], unit='ns')
+            
+            # Extraer venues (compatibilidad con ambos nombres)
+            rising_edges['max_bid_venue'] = rising_edges.get(
+                'venue_max_bid', 
+                rising_edges.get('max_bid_venue', '')
+            )
+            rising_edges['min_ask_venue'] = rising_edges.get(
+                'venue_min_ask',
+                rising_edges.get('min_ask_venue', '')
+            )
+            
+            # Calcular spread en basis points
+            theoretical_profit = rising_edges.get('theoretical_profit', 0.0)
+            rising_edges['spread_bps'] = theoretical_profit * 10000
+            
+            # Obtener cantidad tradeable
+            rising_edges['tradeable_qty'] = rising_edges.get(
+                'tradeable_qty',
+                rising_edges.get('executable_qty', 0)
+            )
+            
+            # Seleccionar columnas relevantes
+            cols = [
+                'isin', 'epoch', 'datetime', 'max_bid_venue', 'min_ask_venue',
+                'spread_bps', 'theoretical_profit', 'tradeable_qty', 'total_profit'
+            ]
+            
+            available_cols = [col for col in cols if col in rising_edges.columns]
+            opportunities_subset = rising_edges[available_cols].copy()
+            
+            all_opportunities.append(opportunities_subset)
+        
+        if not all_opportunities:
+            print("  No hay oportunidades para analizar")
+            return pd.DataFrame()
+        
+        combined_opps = pd.concat(all_opportunities, ignore_index=True)
+        
+        # SANITY CHECKS: Validaciones para filtrar oportunidades sospechosas o inválidas
+        # Estas validaciones ayudan a identificar errores en los datos o oportunidades
+        # que no son ejecutables en la práctica
+        print(f"\n  Aplicando sanity checks...")
+        
+        # Check 1: Spread razonable (<50 bps)
+        # Spreads muy grandes (>50 bps) pueden indicar errores en los datos o
+        # situaciones de mercado anormales (halts, auctions, etc.)
+        reasonable_spread = combined_opps['spread_bps'] < 50
+        print(f"    Spreads razonables (<50 bps): {reasonable_spread.sum():,} / {len(combined_opps):,}")
+        
+        # Check 2: Cantidades realistas (100-10000 shares)
+        # Cantidades muy pequeñas pueden ser errores, muy grandes pueden ser ilíquidas
+        realistic_qty = (combined_opps['tradeable_qty'] >= 100) & (combined_opps['tradeable_qty'] <= 10000)
+        print(f"    Cantidades realistas (100-10000): {realistic_qty.sum():,} / {len(combined_opps):,}")
+        
+        # Check 3: Venues diferentes
+        # CRÍTICO: Arbitraje requiere comprar en un venue y vender en otro
+        # Si ambos venues son iguales, no hay arbitraje real
+        different_venues = combined_opps['max_bid_venue'] != combined_opps['min_ask_venue']
+        print(f"    Venues diferentes: {different_venues.sum():,} / {len(combined_opps):,}")
+        
+        # Check 4: Horario de trading (09:00-17:30 CET)
+        # Fuera del horario de trading continuo, los precios pueden ser de auctions
+        # o pre-market/post-market, que no son ejecutables instantáneamente
+        if 'datetime' in combined_opps.columns:
+            combined_opps['hour'] = combined_opps['datetime'].dt.hour
+            trading_hours = (combined_opps['hour'] >= 9) & (combined_opps['hour'] < 17)
+            print(f"    En horario de trading (09:00-17:30): {trading_hours.sum():,} / {len(combined_opps):,}")
+        
+        # Combinar todos los checks en una máscara única
+        valid_mask = reasonable_spread & realistic_qty & different_venues
+        if 'datetime' in combined_opps.columns:
+            valid_mask = valid_mask & trading_hours
+        
+        valid_opps = combined_opps[valid_mask].copy()
+        
+        # Ordenar por profit total y tomar top N
+        top_opps = valid_opps.nlargest(n, 'total_profit')
+        
+        # Limpiar columnas temporales
+        if 'hour' in top_opps.columns:
+            top_opps = top_opps.drop('hour', axis=1)
+        
+        print(f"\n  Top {n} oportunidades identificadas:")
+        print(top_opps.to_string(index=False))
+        
+        return top_opps
     
     def analyze_opportunities(self, 
                             signals_df: pd.DataFrame,
@@ -53,39 +446,29 @@ class ArbitrageAnalyzer:
         """
         Análisis completo de oportunidades detectadas.
         
+        Compatibilidad con código existente.
+        
         Args:
-            signals_df: DataFrame de signal_generator.detect_opportunities()
-            exec_df: DataFrame de latency_simulator.simulate_execution() (opcional)
+            signals_df: DataFrame de señales detectadas
+            exec_df: DataFrame de ejecuciones (opcional)
         
         Returns:
             Dict con todas las métricas calculadas
         """
-        
         print("\n" + "=" * 80)
         print("ANÁLISIS DE OPORTUNIDADES DE ARBITRAJE")
         print("=" * 80)
         
         metrics = {}
         
-        # ====================================================================
-        # SECCIÓN 1: Métricas Básicas de Detección
-        # ====================================================================
-        print("\n[1] MÉTRICAS DE DETECCIÓN")
-        print("-" * 80)
-        
-        # Total de snapshots analizados
+        # Métricas básicas
         total_snapshots = len(signals_df)
+        total_arbitrage = signals_df.get('is_opportunity', pd.Series([False])).sum()
+        total_rising_edges = signals_df.get('is_rising_edge', pd.Series([False])).sum()
         
-        # Snapshots con condición de arbitraje
-        total_arbitrage = signals_df['is_opportunity'].sum()
-        
-        # Rising edges (oportunidades únicas)
-        total_rising_edges = signals_df['is_rising_edge'].sum()
-        
-        # Oportunidades válidas (con profit > threshold)
         valid_opportunities = signals_df[
-            (signals_df['is_rising_edge']) & 
-            (signals_df['total_profit'] > 0)
+            (signals_df.get('is_rising_edge', False)) & 
+            (signals_df.get('total_profit', 0) > 0)
         ]
         total_valid = len(valid_opportunities)
         
@@ -98,191 +481,69 @@ class ArbitrageAnalyzer:
             'detection_rate_pct': (total_valid / total_snapshots * 100) if total_snapshots > 0 else 0
         }
         
-        print(f"  Total snapshots analizados: {total_snapshots:,}")
-        print(f"  Snapshots con arbitraje: {total_arbitrage:,} ({metrics['detection']['arbitrage_rate_pct']:.4f}%)")
-        print(f"  Rising edges detectados: {total_rising_edges:,}")
-        print(f"  Oportunidades válidas: {total_valid:,} ({metrics['detection']['detection_rate_pct']:.4f}%)")
+        print(f"  Total snapshots: {total_snapshots:,}")
+        print(f"  Rising edges: {total_rising_edges:,}")
+        print(f"  Oportunidades válidas: {total_valid:,}")
         
-        # ====================================================================
-        # SECCIÓN 2: Profit Teórico (sin latencia)
-        # ====================================================================
-        print("\n[2] PROFIT TEÓRICO (LATENCIA = 0)")
-        print("-" * 80)
-        
+        # Profit teórico
         if total_valid > 0:
             total_theoretical = valid_opportunities['total_profit'].sum()
-            avg_theoretical = valid_opportunities['total_profit'].mean()
-            median_theoretical = valid_opportunities['total_profit'].median()
-            std_theoretical = valid_opportunities['total_profit'].std()
-            max_theoretical = valid_opportunities['total_profit'].max()
-            min_theoretical = valid_opportunities['total_profit'].min()
-            
             metrics['theoretical_profit'] = {
                 'total': total_theoretical,
-                'mean': avg_theoretical,
-                'median': median_theoretical,
-                'std': std_theoretical,
-                'max': max_theoretical,
-                'min': min_theoretical
+                'mean': valid_opportunities['total_profit'].mean(),
+                'max': valid_opportunities['total_profit'].max()
             }
-            
-            print(f"  Total profit teórico: €{total_theoretical:.2f}")
-            print(f"  Profit medio: €{avg_theoretical:.4f}")
-            print(f"  Profit mediano: €{median_theoretical:.4f}")
-            print(f"  Desviación estándar: €{std_theoretical:.4f}")
-            print(f"  Rango: €{min_theoretical:.4f} - €{max_theoretical:.4f}")
+            print(f"  Profit teórico total: €{total_theoretical:.2f}")
         else:
             metrics['theoretical_profit'] = None
-            print("  No hay oportunidades válidas")
         
-        # ====================================================================
-        # SECCIÓN 3: Profit Real (con latencia) - Si disponible
-        # ====================================================================
+        # Profit real (si disponible)
         if exec_df is not None and len(exec_df) > 0:
-            print("\n[3] PROFIT REAL (CON LATENCIA)")
-            print("-" * 80)
-            
-            # Filtrar solo profitable
-            profitable_ops = exec_df[exec_df['profit_category'] == 'Profitable']
-            
-            total_real = exec_df['real_total_profit'].sum()
-            profitable_count = len(profitable_ops)
-            success_rate = (profitable_count / len(exec_df) * 100) if len(exec_df) > 0 else 0
-            
-            # Profit loss debido a latencia
-            total_loss = exec_df['profit_loss_total'].sum()
-            retention_rate = (total_real / total_theoretical * 100) if total_theoretical > 0 else 0
+            total_real = exec_df.get('real_total_profit', pd.Series([0])).sum()
+            profitable_count = (exec_df.get('profit_category', '') == 'Profitable').sum()
             
             metrics['real_profit'] = {
                 'total': total_real,
-                'mean': profitable_ops['real_total_profit'].mean() if len(profitable_ops) > 0 else 0,
-                'median': profitable_ops['real_total_profit'].median() if len(profitable_ops) > 0 else 0,
                 'profitable_count': profitable_count,
-                'success_rate_pct': success_rate,
-                'total_loss': total_loss,
-                'retention_rate_pct': retention_rate
+                'success_rate_pct': (profitable_count / len(exec_df) * 100) if len(exec_df) > 0 else 0
             }
-            
-            print(f"  Total profit real: €{total_real:.2f}")
-            print(f"  Oportunidades profitable: {profitable_count:,} / {len(exec_df):,} ({success_rate:.1f}%)")
-            print(f"  Pérdida por latencia: €{total_loss:.2f}")
-            print(f"  Tasa de retención: {retention_rate:.1f}%")
-            
-            if len(profitable_ops) > 0:
-                print(f"  Profit medio (solo profitable): €{metrics['real_profit']['mean']:.4f}")
+            print(f"  Profit real: €{total_real:.2f}")
+            print(f"  Oportunidades profitable: {profitable_count:,}")
         else:
             metrics['real_profit'] = None
         
-        # ====================================================================
-        # SECCIÓN 4: Análisis Temporal
-        # ====================================================================
-        print("\n[4] ANÁLISIS TEMPORAL")
-        print("-" * 80)
-        
-        if total_valid > 0:
-            # Convertir epoch a datetime
-            valid_opportunities['datetime'] = pd.to_datetime(
-                valid_opportunities['epoch'], 
-                unit='ns'
-            )
-            
-            # Duración total
+        # Análisis temporal
+        if total_valid > 0 and 'epoch' in valid_opportunities.columns:
+            valid_opportunities['datetime'] = pd.to_datetime(valid_opportunities['epoch'], unit='ns')
             start_time = valid_opportunities['datetime'].min()
             end_time = valid_opportunities['datetime'].max()
             duration = end_time - start_time
             
-            # Oportunidades por hora
-            opportunities_per_hour = (total_valid / (duration.total_seconds() / 3600)) if duration.total_seconds() > 0 else 0
-            
-            # Distribución por minuto
-            valid_opportunities['minute'] = valid_opportunities['datetime'].dt.floor('1min')
-            ops_by_minute = valid_opportunities.groupby('minute').size()
-            
             metrics['temporal'] = {
                 'start_time': start_time,
                 'end_time': end_time,
-                'duration_seconds': duration.total_seconds(),
-                'opportunities_per_hour': opportunities_per_hour,
-                'busiest_minute': ops_by_minute.idxmax() if len(ops_by_minute) > 0 else None,
-                'max_ops_per_minute': ops_by_minute.max() if len(ops_by_minute) > 0 else 0
+                'duration_seconds': duration.total_seconds()
             }
-            
-            print(f"  Rango temporal: {start_time} - {end_time}")
-            print(f"  Duración: {duration}")
-            print(f"  Oportunidades por hora: {opportunities_per_hour:.2f}")
-            print(f"  Minuto más activo: {metrics['temporal']['busiest_minute']}")
-            print(f"  Max oportunidades/minuto: {metrics['temporal']['max_ops_per_minute']}")
-        else:
-            metrics['temporal'] = None
         
-        # ====================================================================
-        # SECCIÓN 5: Análisis por Pares de Venues
-        # ====================================================================
-        print("\n[5] ANÁLISIS POR PARES DE VENUES")
-        print("-" * 80)
-        
+        # Análisis por pares de venues
         if total_valid > 0:
-            # Crear identificador de par
-            valid_opportunities['venue_pair'] = (
-                'Buy@' + valid_opportunities['venue_min_ask'] + 
-                ' / Sell@' + valid_opportunities['venue_max_bid']
-            )
+            venue_max_col = valid_opportunities.get('venue_max_bid', valid_opportunities.get('max_bid_venue', ''))
+            venue_min_col = valid_opportunities.get('venue_min_ask', valid_opportunities.get('min_ask_venue', ''))
             
-            # Agrupar por par
-            pairs_analysis = valid_opportunities.groupby('venue_pair').agg({
-                'total_profit': ['count', 'sum', 'mean', 'max'],
-                'theoretical_profit': 'mean',
-                'executable_qty': 'mean'
-            }).reset_index()
-            
-            pairs_analysis.columns = [
-                'Venue Pair', 'Count', 'Total Profit', 'Avg Profit', 
-                'Max Profit', 'Avg Price Diff', 'Avg Qty'
-            ]
-            
-            pairs_analysis = pairs_analysis.sort_values('Total Profit', ascending=False)
-            
-            metrics['venue_pairs'] = pairs_analysis
-            
-            print(f"\n  Top 5 Pares de Venues:")
-            print(pairs_analysis.head(5).to_string(index=False))
-        else:
-            metrics['venue_pairs'] = None
-        
-        # ====================================================================
-        # SECCIÓN 6: Estadísticas de Spreads
-        # ====================================================================
-        print("\n[6] ESTADÍSTICAS DE SPREADS")
-        print("-" * 80)
-        
-        if total_valid > 0:
-            # Spread en basis points
-            valid_opportunities['spread_bps'] = (
-                valid_opportunities['theoretical_profit'] * 10000
-            )
-            
-            spread_stats = {
-                'mean_bps': valid_opportunities['spread_bps'].mean(),
-                'median_bps': valid_opportunities['spread_bps'].median(),
-                'std_bps': valid_opportunities['spread_bps'].std(),
-                'min_bps': valid_opportunities['spread_bps'].min(),
-                'max_bps': valid_opportunities['spread_bps'].max(),
-                'q25_bps': valid_opportunities['spread_bps'].quantile(0.25),
-                'q75_bps': valid_opportunities['spread_bps'].quantile(0.75)
-            }
-            
-            metrics['spreads'] = spread_stats
-            
-            print(f"  Spread medio: {spread_stats['mean_bps']:.2f} bps")
-            print(f"  Spread mediano: {spread_stats['median_bps']:.2f} bps")
-            print(f"  Rango: {spread_stats['min_bps']:.2f} - {spread_stats['max_bps']:.2f} bps")
-            print(f"  Percentiles (Q25, Q75): {spread_stats['q25_bps']:.2f}, {spread_stats['q75_bps']:.2f} bps")
-        else:
-            metrics['spreads'] = None
-        
-        print("\n" + "=" * 80)
-        print("[ANÁLISIS COMPLETADO]")
-        print("=" * 80)
+            if venue_max_col is not None and venue_min_col is not None:
+                valid_opportunities['venue_pair'] = (
+                    'Buy@' + venue_min_col.astype(str) + 
+                    ' / Sell@' + venue_max_col.astype(str)
+                )
+                
+                pairs_analysis = valid_opportunities.groupby('venue_pair').agg({
+                    'total_profit': ['count', 'sum', 'mean']
+                }).reset_index()
+                
+                pairs_analysis.columns = ['Venue Pair', 'Count', 'Total Profit', 'Avg Profit']
+                pairs_analysis = pairs_analysis.sort_values('Total Profit', ascending=False)
+                
+                metrics['venue_pairs'] = pairs_analysis
         
         return metrics
     
@@ -293,63 +554,31 @@ class ArbitrageAnalyzer:
         """
         Estima ROI considerando costes de trading.
         
-        COSTES TÍPICOS:
-        - Comisiones: 0.1-0.5 bps por lado (0.2-1.0 bps total)
-        - Slippage: 0.1-0.5 bps
-        - Market impact: Variable según volumen
-        
-        Args:
-            metrics: Dict de analyze_opportunities()
-            trading_costs_bps: Costes totales de trading en basis points
-            capital_eur: Capital disponible para trading
-        
-        Returns:
-            Dict con estimaciones de ROI
+        Compatibilidad con código existente.
         """
-        
         print("\n" + "=" * 80)
         print("ESTIMACIÓN DE ROI")
         print("=" * 80)
         
         roi_metrics = {}
         
-        # Verificar que hay datos
         if metrics.get('real_profit') is None:
             print("  [ADVERTENCIA] No hay datos de profit real para calcular ROI")
             return roi_metrics
         
-        # Profit bruto (sin costes)
         gross_profit = metrics['real_profit']['total']
-        
-        # Calcular costes de trading
-        # Costes = (spread en bps) * valor nominal de cada trade
-        # Aproximación: usar profit total y asumir que cada oportunidad
-        # involucra un valor nominal promedio
-        
-        total_ops = metrics['real_profit']['profitable_count']
+        total_ops = metrics['real_profit'].get('profitable_count', 0)
         
         if total_ops == 0:
-            print("  [ADVERTENCIA] No hay oportunidades profitable")
             return roi_metrics
         
-        # Asumir valor nominal medio por operación
-        # (esto debería calcularse con los datos reales de qty y precios)
-        avg_notional_per_trade = capital_eur / 10  # Conservador: 10% del capital por trade
-        
-        # Costes totales = ops * notional * (costs_bps / 10000)
+        avg_notional_per_trade = capital_eur / 10
         trading_costs = total_ops * avg_notional_per_trade * (trading_costs_bps / 10000)
-        
-        # Profit neto
         net_profit = gross_profit - trading_costs
-        
-        # ROI = (net profit / capital) * 100
         roi_pct = (net_profit / capital_eur * 100) if capital_eur > 0 else 0
         
-        # Duración del análisis
-        duration_hours = metrics['temporal']['duration_seconds'] / 3600 if metrics.get('temporal') else 1
-        
-        # ROI anualizado (extrapolación)
-        hours_per_year = 252 * 7  # 252 trading days * 7 hours/day
+        duration_hours = metrics.get('temporal', {}).get('duration_seconds', 3600) / 3600
+        hours_per_year = 252 * 7
         roi_annualized = roi_pct * (hours_per_year / duration_hours) if duration_hours > 0 else 0
         
         roi_metrics = {
@@ -358,18 +587,11 @@ class ArbitrageAnalyzer:
             'net_profit': net_profit,
             'capital': capital_eur,
             'roi_pct': roi_pct,
-            'roi_annualized_pct': roi_annualized,
-            'profitable_ops': total_ops,
-            'avg_notional_per_trade': avg_notional_per_trade,
-            'trading_costs_bps': trading_costs_bps
+            'roi_annualized_pct': roi_annualized
         }
         
-        print(f"  Capital: €{capital_eur:,.0f}")
-        print(f"  Profit bruto: €{gross_profit:.2f}")
-        print(f"  Costes de trading ({trading_costs_bps} bps): €{trading_costs:.2f}")
-        print(f"  Profit neto: €{net_profit:.2f}")
         print(f"  ROI: {roi_pct:.4f}%")
-        print(f"  ROI anualizado (extrapolado): {roi_annualized:.2f}%")
+        print(f"  ROI anualizado: {roi_annualized:.2f}%")
         
         return roi_metrics
     
@@ -380,94 +602,77 @@ class ArbitrageAnalyzer:
         """
         Genera un reporte resumen en formato texto.
         
-        Args:
-            metrics: Dict de analyze_opportunities()
-            roi_metrics: Dict de estimate_roi() (opcional)
-            output_path: Path para guardar el reporte (opcional)
-        
-        Returns:
-            String con el reporte completo
+        Compatibilidad con código existente.
         """
-        
         report_lines = []
         
-        # Header
         report_lines.append("=" * 80)
-        report_lines.append("REPORTE DE ANÁLISIS DE ARBITRAJE - MERCADOS FRAGMENTADOS EUROPEOS")
+        report_lines.append("REPORTE DE ANÁLISIS DE ARBITRAJE")
         report_lines.append("=" * 80)
-        report_lines.append(f"Fecha de generación: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        report_lines.append(f"Fecha: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         report_lines.append("")
         
-        # Sección 1: Detección
         if metrics.get('detection'):
-            report_lines.append("[1] MÉTRICAS DE DETECCIÓN")
-            report_lines.append("-" * 80)
             d = metrics['detection']
-            report_lines.append(f"Total snapshots analizados: {d['total_snapshots']:,}")
-            report_lines.append(f"Snapshots con arbitraje: {d['snapshots_with_arbitrage']:,} ({d['arbitrage_rate_pct']:.4f}%)")
-            report_lines.append(f"Oportunidades válidas: {d['valid_opportunities']:,} ({d['detection_rate_pct']:.4f}%)")
-            report_lines.append("")
+            report_lines.append(f"Oportunidades válidas: {d['valid_opportunities']:,}")
         
-        # Sección 2: Profit Teórico
         if metrics.get('theoretical_profit'):
-            report_lines.append("[2] PROFIT TEÓRICO (LATENCIA = 0)")
-            report_lines.append("-" * 80)
             tp = metrics['theoretical_profit']
-            report_lines.append(f"Total: €{tp['total']:.2f}")
-            report_lines.append(f"Medio: €{tp['mean']:.4f}")
-            report_lines.append(f"Mediano: €{tp['median']:.4f}")
-            report_lines.append(f"Rango: €{tp['min']:.4f} - €{tp['max']:.4f}")
-            report_lines.append("")
+            report_lines.append(f"Profit teórico: €{tp['total']:.2f}")
         
-        # Sección 3: Profit Real
         if metrics.get('real_profit'):
-            report_lines.append("[3] PROFIT REAL (CON LATENCIA)")
-            report_lines.append("-" * 80)
             rp = metrics['real_profit']
-            report_lines.append(f"Total: €{rp['total']:.2f}")
-            report_lines.append(f"Tasa de éxito: {rp['success_rate_pct']:.1f}%")
-            report_lines.append(f"Pérdida por latencia: €{rp['total_loss']:.2f}")
-            report_lines.append(f"Retención de profit: {rp['retention_rate_pct']:.1f}%")
-            report_lines.append("")
+            report_lines.append(f"Profit real: €{rp['total']:.2f}")
         
-        # Sección 4: Temporal
-        if metrics.get('temporal'):
-            report_lines.append("[4] ANÁLISIS TEMPORAL")
-            report_lines.append("-" * 80)
-            t = metrics['temporal']
-            report_lines.append(f"Duración: {t['duration_seconds']:.0f} segundos")
-            report_lines.append(f"Oportunidades/hora: {t['opportunities_per_hour']:.2f}")
-            report_lines.append("")
-        
-        # Sección 5: ROI
         if roi_metrics:
-            report_lines.append("[5] RETORNO DE INVERSIÓN")
-            report_lines.append("-" * 80)
-            report_lines.append(f"Capital: €{roi_metrics['capital']:,.0f}")
-            report_lines.append(f"Profit neto: €{roi_metrics['net_profit']:.2f}")
             report_lines.append(f"ROI: {roi_metrics['roi_pct']:.4f}%")
-            report_lines.append(f"ROI anualizado: {roi_metrics['roi_annualized_pct']:.2f}%")
-            report_lines.append("")
-        
-        # Sección 6: Top Venue Pairs
-        if metrics.get('venue_pairs') is not None:
-            report_lines.append("[6] TOP PARES DE VENUES")
-            report_lines.append("-" * 80)
-            top5 = metrics['venue_pairs'].head(5)
-            report_lines.append(top5.to_string(index=False))
-            report_lines.append("")
-        
-        # Footer
-        report_lines.append("=" * 80)
-        report_lines.append("[FIN DEL REPORTE]")
-        report_lines.append("=" * 80)
         
         report = "\n".join(report_lines)
         
-        # Guardar si se especifica path
         if output_path:
             with open(output_path, 'w', encoding='utf-8') as f:
                 f.write(report)
-            print(f"\n  Reporte guardado en: {output_path}")
         
         return report
+
+
+# ============================================================================
+# FUNCIONES WRAPPER ESTÁTICAS (según especificaciones)
+# ============================================================================
+
+def generate_isin_summary(signals_dict: Dict[str, pd.DataFrame],
+                          latency_results_dict: Dict[str, pd.DataFrame]) -> pd.DataFrame:
+    """
+    Genera resumen por ISIN con métricas clave.
+    
+    Wrapper estático según especificaciones.
+    """
+    return ArbitrageAnalyzer.generate_isin_summary(signals_dict, latency_results_dict)
+
+
+def create_money_table(latency_results_dict: Dict[str, pd.DataFrame]) -> pd.DataFrame:
+    """
+    Tabla pivote con ISINs en filas y latencias en columnas.
+    
+    Wrapper estático según especificaciones.
+    """
+    return ArbitrageAnalyzer.create_money_table(latency_results_dict)
+
+
+def calculate_decay_curve(latency_results_dict: Dict[str, pd.DataFrame]) -> pd.DataFrame:
+    """
+    Agrega todos los ISINs para obtener la curva global de decay.
+    
+    Wrapper estático según especificaciones.
+    """
+    return ArbitrageAnalyzer.calculate_decay_curve(latency_results_dict)
+
+
+def identify_top_opportunities(signals_dict: Dict[str, pd.DataFrame],
+                                n: int = 5) -> pd.DataFrame:
+    """
+    Identifica las N oportunidades individuales más rentables.
+    
+    Wrapper estático según especificaciones.
+    """
+    return ArbitrageAnalyzer.identify_top_opportunities(signals_dict, n)

@@ -1,0 +1,3 @@
+epoch,execution_epoch,venue_max_bid,venue_min_ask,execution_bid,execution_ask,theoretical_profit,real_profit,executed_qty,total_profit,real_total_profit,profit_category
+1762523900000000,1762523900100000,CEUX,XMAD,8.890000343322754,8.891,2.2888183615066282e-07,-0.000999656677246108,0.0,0.00011856079112604334,-0.0,Loss
+1762533000000000,1762533000100000,AQEU,XMAD,0.0,0.0,0.014000473022461435,0.0,0.0,13.286448898315902,0.0,Break-even

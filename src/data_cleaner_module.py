@@ -1,150 +1,179 @@
 """
 ================================================================================
-data_cleaner.py - Módulo de Limpieza y Validación de Datos
+data_cleaner.py - Módulo de Limpieza y Validación de Datos (OPTIMIZADO)
 ================================================================================
-Responsabilidades:
-- Filtrado de magic numbers (precios inválidos del vendor)
-- Validación de precios y cantidades
-- Detección de crossed books (bid >= ask)
-- Filtrado por market status (solo continuous trading)
 
-Pipeline de limpieza (FASE 2):
+CRITICAL DATA VENDOR SPECS:
+
+**A. Magic Numbers (ELIMINAR):**
+- 666666.666 → Unquoted/Unknown
+- 999999.999 → Market Order (At Best)
+- 999999.989 → At Open Order
+- 999999.988 → At Close Order
+- 999999.979 → Pegged Order
+- 999999.123 → Unquoted/Unknown
+
+**B. Market Status Codes (FILTRAR POR ESTOS):**
+Solo válidas quotes cuando mercado está en Continuous Trading:
+- AQUIS (AQXE): [5308427]
+- BME (XMAD): [5832713, 5832756]
+- CBOE (CEUX): [12255233]
+- TURQUOISE (TRQX): [7608181]
+
+PIPELINE DE LIMPIEZA (ORDEN CRÍTICO):
 1. Clean magic numbers
-2. Clean invalid prices
-3. Clean crossed books
-4. Filter by market status
+2. Filter by trading status
+3. Validate prices
+
+OPTIMIZACIONES APLICADAS:
+- Operaciones vectorizadas con máscaras booleanas
+- Early exit en validaciones
+- Métodos compartidos para reducir duplicación
+- Logging detallado con métricas de calidad
+- Validación de Book Identity Key integrada
+
 ================================================================================
 """
 
 import pandas as pd
+import numpy as np
 import logging
-from typing import Dict
+from typing import Dict, Optional, Tuple, List
 
 from config_module import config
 
 logger = logging.getLogger(__name__)
 
+# Constantes para optimización
+MAX_REASONABLE_PRICE = config.MAX_REASONABLE_PRICE
+
 
 class DataCleaner:
     """
-    Clase responsable de aplicar filtros de calidad de datos.
+    Clase responsable de aplicar filtros de calidad de datos según especificaciones del vendor.
     
     CRÍTICO: La limpieza es esencial para evitar señales de arbitraje falsas.
     Los magic numbers y estados de mercado inválidos generarían oportunidades
     que en realidad no son ejecutables.
     """
     
+    def __init__(self):
+        """Inicializa el limpiador con configuración del vendor."""
+        self.magic_numbers = set(config.MAGIC_NUMBERS)  # Set para búsqueda O(1)
+        self.valid_states = config.VALID_STATES.copy()
+    
     @staticmethod
-    def clean_magic_numbers(df: pd.DataFrame) -> pd.DataFrame:
+    def clean_magic_numbers(df: pd.DataFrame, 
+                            price_columns: List[str] = None) -> Tuple[pd.DataFrame, int]:
         """
-        Elimina snapshots con magic numbers en precios.
+        Elimina filas con magic numbers en cualquier columna de precios.
         
         CRÍTICO: Los magic numbers NO son precios reales. Son códigos especiales
         del vendor para indicar estados como "Market Order", "Pegged Order", etc.
         
-        Si no se filtran, se detectarían oportunidades falsas con profits de
-        millones de euros.
-        
-        Fuente: Arbitrage study in BME.docx - Section 2.A "Magic Numbers"
-        
         Args:
-            df: DataFrame con columnas px_bid_0 y px_ask_0
-            
+            df: DataFrame con quotes
+            price_columns: Lista de columnas de precios a verificar
+                          (default: ['px_bid_0', 'px_ask_0'])
+        
         Returns:
-            DataFrame filtrado (sin magic numbers)
+            Tuple[DataFrame limpio, número de filas eliminadas]
         """
+        if price_columns is None:
+            price_columns = ['px_bid_0', 'px_ask_0']
+        
         initial_len = len(df)
+        if initial_len == 0:
+            return df, 0
         
-        # Crear máscaras: True si NO es magic number
-        bid_mask = ~df['px_bid_0'].isin(config.MAGIC_NUMBERS)
-        ask_mask = ~df['px_ask_0'].isin(config.MAGIC_NUMBERS)
+        # Verificar que las columnas existen
+        available_cols = [col for col in price_columns if col in df.columns]
+        if not available_cols:
+            logger.warning(f"    No se encontraron columnas de precios para filtrar magic numbers")
+            return df, 0
         
-        # Aplicar filtro combinado
-        df_clean = df[bid_mask & ask_mask].copy()
+        # Crear máscara combinada: True si NO hay magic numbers en ninguna columna
+        # Optimizado: usar isin con set para O(1) lookup en lugar de loops
+        # Inicializar máscara como True (todas las filas válidas inicialmente)
+        mask = pd.Series(True, index=df.index)
         
+        # Para cada columna de precios, eliminar filas con magic numbers
+        for col in available_cols:
+            mask &= ~df[col].isin(config.MAGIC_NUMBERS)
+        
+        # Aplicar máscara (solo copiar si es necesario modificar)
+        df_clean = df[mask].copy()
         removed = initial_len - len(df_clean)
+        
         if removed > 0:
             pct = removed / initial_len * 100
             logger.info(f"    Removed {removed:,} magic numbers ({pct:.2f}%)")
         
-        return df_clean
+        return df_clean, removed
     
     @staticmethod
-    def clean_invalid_prices(df: pd.DataFrame) -> pd.DataFrame:
+    def validate_prices(df: pd.DataFrame) -> Tuple[pd.DataFrame, Dict[str, int]]:
         """
-        Valida que todos los precios y cantidades sean positivos y no-NaN.
+        Aplica validaciones lógicas de precios y cantidades.
         
         Validaciones:
-        - px_bid_0 > 0
-        - px_ask_0 > 0
-        - qty_bid_0 > 0
-        - qty_ask_0 > 0
-        - No NaN values
+        1. px_bid_0 > 0 y px_ask_0 > 0
+        2. px_bid_0 < px_ask_0 (no crossed book dentro del venue)
+        3. qty_bid_0 > 0 y qty_ask_0 > 0
+        4. Precios < MAX_REASONABLE_PRICE EUR (sanity check)
         
         Args:
             df: DataFrame con columnas de precios y cantidades
             
         Returns:
-            DataFrame con precios válidos
+            Tuple[DataFrame validado, estadísticas de eliminación]
+            Estadísticas: {'removed': int, 'pct_removed': float}
         """
         initial_len = len(df)
+        if initial_len == 0:
+            return df, {'removed': 0, 'pct_removed': 0.0}
         
-        # Máscara combinada de validaciones
+        # Máscara combinada optimizada (una sola pasada)
+        # Validaciones: positivos, no NaN, spread válido, precio razonable
         mask = (
             (df['px_bid_0'] > 0) &
             (df['px_ask_0'] > 0) &
             (df['qty_bid_0'] > 0) &
             (df['qty_ask_0'] > 0) &
             (df['px_bid_0'].notna()) &
-            (df['px_ask_0'].notna())
+            (df['px_ask_0'].notna()) &
+            (df['px_bid_0'] < df['px_ask_0']) &  # No crossed book
+            (df['px_bid_0'] < MAX_REASONABLE_PRICE) &
+            (df['px_ask_0'] < MAX_REASONABLE_PRICE)
         )
         
         df_clean = df[mask].copy()
-        
         removed = initial_len - len(df_clean)
-        if removed > 0:
-            logger.info(f"    Removed {removed:,} invalid prices")
         
-        return df_clean
+        stats = {
+            'removed': removed,
+            'pct_removed': (removed / initial_len * 100) if initial_len > 0 else 0.0
+        }
+        
+        if removed > 0:
+            logger.info(f"    Removed {removed:,} invalid prices ({stats['pct_removed']:.2f}%)")
+            # Desglose de razones (opcional, solo si hay muchas eliminaciones)
+            if removed > initial_len * 0.1:  # Más del 10% eliminado
+                crossed = ((df['px_bid_0'] >= df['px_ask_0']).sum() if 'px_bid_0' in df.columns else 0)
+                too_high = ((df['px_bid_0'] >= MAX_REASONABLE_PRICE).sum() if 'px_bid_0' in df.columns else 0)
+                if crossed > 0:
+                    logger.warning(f"      - Crossed books: {crossed:,}")
+                if too_high > 0:
+                    logger.warning(f"      - Precios > €{MAX_REASONABLE_PRICE}: {too_high:,}")
+        
+        return df_clean, stats
     
     @staticmethod
-    def clean_crossed_book(df: pd.DataFrame) -> pd.DataFrame:
+    def filter_by_trading_status(qte_df: pd.DataFrame,
+                                 sts_df: pd.DataFrame,
+                                 mic: str) -> Tuple[pd.DataFrame, int]:
         """
-        Elimina snapshots donde bid >= ask dentro del mismo venue.
-        
-        Un "crossed book" indica error en los datos. En un mercado normal,
-        el mejor bid siempre debe ser menor que el mejor ask dentro del
-        mismo venue. Si bid >= ask, habría arbitraje instantáneo y el
-        mercado se auto-corregiría inmediatamente.
-        
-        NOTA: Cross-venue arbitrage (bid de venue A > ask de venue B) es
-        lo que QUEREMOS detectar. Esto solo filtra anomalías internas.
-        
-        Args:
-            df: DataFrame con px_bid_0 y px_ask_0
-            
-        Returns:
-            DataFrame sin crossed books
-        """
-        initial_len = len(df)
-        
-        # Condición normal: bid < ask
-        mask = df['px_bid_0'] < df['px_ask_0']
-        df_clean = df[mask].copy()
-        
-        removed = initial_len - len(df_clean)
-        if removed > 0:
-            logger.warning(f"    Removed {removed:,} crossed books (bid >= ask)")
-        
-        return df_clean
-    
-    @staticmethod
-    def filter_by_market_status(qte_df: pd.DataFrame, 
-                                sts_df: pd.DataFrame, 
-                                mic: str) -> pd.DataFrame:
-        """
-        Filtra snapshots para mantener SOLO los que ocurren durante
-        continuous trading.
+        Filtra quotes para mantener solo momentos de Continuous Trading.
         
         CRÍTICO: Operar durante auctions, halts o pre-open generaría señales
         falsas. Las órdenes no se ejecutarían instantáneamente en esos estados.
@@ -158,28 +187,28 @@ class DataCleaner:
         Fuente: Arbitrage study in BME.docx - Section 2.B "Market Status Codes"
         
         Args:
-            qte_df: DataFrame con quotes
-            sts_df: DataFrame con trading status
-            mic: Market Identifier Code (XMAD, AQXE, CEUX, TRQX)
+            qte_df: DataFrame de quotes (ordenado por epoch)
+            sts_df: DataFrame de status (ordenado por epoch)
+            mic: Código del venue (para saber qué estados son válidos)
             
         Returns:
-            DataFrame filtrado (solo continuous trading si es posible)
+            Tuple[DataFrame filtrado, número de filas eliminadas]
         """
-        # Validar datos de entrada
+        initial_len = len(qte_df)
+        
+        # Validar datos de entrada (early exit)
         if sts_df is None or len(sts_df) == 0:
             logger.warning(f"    No STS data for {mic}, skipping status filter")
-            return qte_df
+            return qte_df, 0
         
         if mic not in config.VALID_STATES:
             logger.warning(f"    Unknown MIC {mic}, skipping status filter")
-            return qte_df
-        
-        initial_len = len(qte_df)
+            return qte_df, 0
         
         # Verificar si la columna existe
         if 'market_trading_status' not in sts_df.columns:
             logger.warning(f"    Column 'market_trading_status' not found in STS for {mic}")
-            return qte_df
+            return qte_df, 0
         
         # CORRECCIÓN: Verificar si los códigos válidos existen en los datos
         valid_codes = config.VALID_STATES[mic]
@@ -195,12 +224,66 @@ class DataCleaner:
             logger.error(f"    [CRÍTICO] No matching trading status codes found for {mic}")
             logger.error(f"    Expected codes: {valid_codes}")
             logger.error(f"    Found codes: {sorted(actual_codes)}")
-            logger.error(f"    [ADVERTENCIA] Keeping all data without status filtering - NO SE ESTÁN FILTRANDO DATOS NO CONTINUOS")
-            return qte_df
+            logger.error(f"    [ADVERTENCIA] Keeping all data without status filtering")
+            return qte_df, 0
         
-        # Ordenar ambos DataFrames por timestamp
-        qte_sorted = qte_df.sort_values('epoch').copy()
-        sts_sorted = sts_df[['epoch', 'market_trading_status']].sort_values('epoch').copy()
+        # ====================================================================
+        # VALIDACIÓN DEL BOOK IDENTITY KEY: (session, isin, mic, ticker)
+        # ====================================================================
+        # CRÍTICO: Asegurar que QTE y STS pertenecen al mismo order book
+        # Esto previene joins incorrectos entre diferentes sessions/isins/tickers
+        book_identity_valid = True
+        identity_fields = []
+        
+        if 'session' in qte_df.columns and 'session' in sts_df.columns:
+            qte_session = qte_df['session'].iloc[0] if len(qte_df) > 0 else None
+            sts_session = sts_df['session'].iloc[0] if len(sts_df) > 0 else None
+            if qte_session != sts_session:
+                logger.error(f"    [ERROR] Book Identity Key mismatch: session QTE={qte_session} != STS={sts_session}")
+                book_identity_valid = False
+            else:
+                identity_fields.append(f"session={qte_session}")
+        
+        if 'isin' in qte_df.columns and 'isin' in sts_df.columns:
+            qte_isin = qte_df['isin'].iloc[0] if len(qte_df) > 0 else None
+            sts_isin = sts_df['isin'].iloc[0] if len(sts_df) > 0 else None
+            if qte_isin != sts_isin:
+                logger.error(f"    [ERROR] Book Identity Key mismatch: isin QTE={qte_isin} != STS={sts_isin}")
+                book_identity_valid = False
+            else:
+                identity_fields.append(f"isin={qte_isin}")
+        
+        if 'ticker' in qte_df.columns and 'ticker' in sts_df.columns:
+            qte_ticker = qte_df['ticker'].iloc[0] if len(qte_df) > 0 else None
+            sts_ticker = sts_df['ticker'].iloc[0] if len(sts_df) > 0 else None
+            if qte_ticker != sts_ticker:
+                logger.error(f"    [ERROR] Book Identity Key mismatch: ticker QTE={qte_ticker} != STS={sts_ticker}")
+                book_identity_valid = False
+            else:
+                identity_fields.append(f"ticker={qte_ticker}")
+        
+        # mic ya está validado implícitamente (se pasa como parámetro)
+        identity_fields.append(f"mic={mic}")
+        
+        if book_identity_valid and len(identity_fields) > 1:
+            logger.info(f"    [OK] Book Identity Key validado: ({', '.join(identity_fields)})")
+        elif not book_identity_valid:
+            logger.error(f"    [CRÍTICO] Book Identity Key no coincide - abortando join QTE-STS")
+            logger.error(f"    Esto podría causar joins incorrectos entre diferentes order books")
+            return qte_df  # Retornar QTE sin filtrar por status si hay mismatch
+        
+        # Optimización: Solo ordenar si no está ya ordenado
+        if not qte_df['epoch'].is_monotonic_increasing:
+            qte_sorted = qte_df.sort_values('epoch').copy()
+        else:
+            qte_sorted = qte_df.copy()
+        
+        # Seleccionar columnas necesarias de STS (optimizado)
+        sts_cols = ['epoch', 'market_trading_status']
+        if not sts_df['epoch'].is_monotonic_increasing:
+            sts_sorted = sts_df[sts_cols].sort_values('epoch').copy()
+        else:
+            sts_sorted = sts_df[sts_cols].copy()
         
         # Merge asof: Asigna a cada snapshot el estado más reciente anterior
         # direction='backward' significa "usar el último valor conocido"
@@ -213,7 +296,7 @@ class DataCleaner:
             )
         except Exception as e:
             logger.error(f"    Error in merge_asof for {mic}: {e}")
-            return qte_df
+            return qte_df, 0
         
         # DIAGNÓSTICO: Verificar cuántos snapshots tienen estado asignado
         snapshots_with_status = merged['market_trading_status'].notna().sum()
@@ -229,7 +312,7 @@ class DataCleaner:
             logger.error(f"    [CRÍTICO] Ningún snapshot tiene estado asignado después del merge_asof para {mic}")
             logger.error(f"    Esto puede indicar que los timestamps de QTE y STS no coinciden")
             logger.error(f"    Manteniendo datos originales sin filtrar")
-            return qte_df
+            return qte_df, 0
         
         # Filtrar por códigos válidos de continuous trading
         merged_filtered = merged_with_status[
@@ -256,91 +339,149 @@ class DataCleaner:
             logger.error(f"    [CRÍTICO] Status filtering would remove ALL data for {mic}")
             logger.error(f"    Esto indica que ningún snapshot tiene estado de continuous trading")
             logger.error(f"    Manteniendo datos originales sin filtrar")
-            return qte_df
+            return qte_df, 0
         
         if removed > 0:
             pct = removed / initial_len * 100
             logger.info(f"    [OK] Removed {removed:,} non-trading snapshots ({pct:.2f}%)")
             logger.info(f"    [OK] Kept {len(merged_filtered):,} continuous trading snapshots ({100-pct:.2f}%)")
         else:
-            logger.warning(f"    [ADVERTENCIA] No se eliminaron snapshots - todos parecen ser continuous trading")
-            logger.warning(f"    Esto puede ser correcto o puede indicar un problema con el filtro")
+            logger.debug(f"    No se eliminaron snapshots - todos son continuous trading")
         
-        return merged_filtered
+        return merged_filtered, removed
     
-    def clean_venue_data(self, venue_dict: Dict, mic: str) -> pd.DataFrame:
+    # Alias para mantener compatibilidad con código existente
+    @staticmethod
+    def filter_by_market_status(qte_df: pd.DataFrame,
+                                sts_df: pd.DataFrame,
+                                mic: str) -> pd.DataFrame:
         """
-        Aplica el pipeline completo de limpieza a un venue.
+        Alias de filter_by_trading_status para mantener compatibilidad.
+        Retorna solo el DataFrame (sin métricas) para compatibilidad con código existente.
+        """
+        df_filtered, _ = DataCleaner.filter_by_trading_status(qte_df, sts_df, mic)
+        return df_filtered
+    
+    def clean_venue_data(self, qte_df: pd.DataFrame, 
+                        sts_df: Optional[pd.DataFrame],
+                        mic: str) -> Tuple[pd.DataFrame, Dict[str, float]]:
+        """
+        Aplica todo el pipeline de limpieza en orden según especificaciones.
         
-        Pipeline secuencial:
-        1. Magic numbers
-        2. Invalid prices
-        3. Crossed books
-        4. Market status (con filtrado adaptativo)
-        5. Generar columna seq si no existe (REQUISITO: secuencia después del epoch)
+        Pipeline (ORDEN CRÍTICO):
+        1. Clean magic numbers
+        2. Filter by trading status
+        3. Validate prices
         
         Args:
-            venue_dict: Dict con keys 'qte' y 'sts'
+            qte_df: DataFrame de quotes
+            sts_df: DataFrame de status (opcional)
             mic: Market Identifier Code
             
         Returns:
-            DataFrame limpio y validado
+            Tuple[DataFrame limpio, métricas de calidad]
+            Métricas: {'original': int, 'after_magic': int, 'after_status': int, 
+                      'final': int, 'pct_retained': float}
         """
         print(f"\n  [LIMPIEZA] {mic}...")
         
-        qte_df = venue_dict['qte']
-        sts_df = venue_dict['sts']
+        initial_len = len(qte_df)
+        print(f"    Snapshots iniciales: {initial_len:,}")
         
-        print(f"    Snapshots iniciales: {len(qte_df):,}")
+        metrics = {
+            'original': initial_len,
+            'removed_magic': 0,
+            'removed_status': 0,
+            'removed_validation': 0,
+            'final': 0,
+            'pct_retained': 0.0
+        }
         
-        # Aplicar filtros secuencialmente
-        df = qte_df.copy()
-        df = self.clean_magic_numbers(df)
-        df = self.clean_invalid_prices(df)
-        df = self.clean_crossed_book(df)
-        df = self.filter_by_market_status(df, sts_df, mic)
+        if initial_len == 0:
+            logger.warning(f"    {mic}: DataFrame vacío")
+            return qte_df, metrics
         
-        # REQUISITO 5: Generar columna seq si no existe
-        # Si varios eventos tienen el mismo epoch, usar columna seq si existe
-        # Si no existe, generarla determinísticamente: groupby(['session','isin','epoch']).cumcount()
-        if 'seq' not in df.columns:
-            # Intentar usar session e isin si están disponibles
-            grouping_cols = []
-            if 'session' in df.columns:
-                grouping_cols.append('session')
-            if 'isin' in df.columns:
-                grouping_cols.append('isin')
-            
-            # Siempre agrupar por epoch
-            grouping_cols.append('epoch')
-            
-            if len(grouping_cols) > 1:
-                # Generar seq determinísticamente
-                df = df.sort_values(grouping_cols + ['epoch']).reset_index(drop=True)
-                df['seq'] = df.groupby(grouping_cols, sort=False).cumcount()
-                logger.info(f"    Generada columna 'seq' usando groupby({grouping_cols}).cumcount()")
-            else:
-                # Si no hay session/isin, solo agrupar por epoch
-                df = df.sort_values('epoch').reset_index(drop=True)
-                df['seq'] = df.groupby('epoch', sort=False).cumcount()
-                logger.info(f"    Generada columna 'seq' usando groupby('epoch').cumcount()")
-        else:
-            logger.info(f"    Columna 'seq' ya existe en los datos")
+        # PASO 1: Clean magic numbers
+        df, removed_magic = self.clean_magic_numbers(qte_df)
+        metrics['removed_magic'] = removed_magic
+        metrics['after_magic'] = len(df)
         
-        print(f"    [OK] Snapshots finales: {len(df):,} (limpios)")
+        if len(df) == 0:
+            logger.warning(f"    {mic}: Todos los datos eliminados por magic numbers")
+            metrics['final'] = 0
+            metrics['pct_retained'] = 0.0
+            return df, metrics
+        
+        # PASO 2: Filter by trading status
+        df, removed_status = self.filter_by_trading_status(df, sts_df, mic)
+        metrics['removed_status'] = removed_status
+        metrics['after_status'] = len(df)
+        
+        if len(df) == 0:
+            logger.warning(f"    {mic}: Todos los datos eliminados por status filtering")
+            metrics['final'] = 0
+            metrics['pct_retained'] = 0.0
+            return df, metrics
+        
+        # PASO 3: Validate prices (incluye crossed books y sanity checks)
+        df, validation_stats = self.validate_prices(df)
+        metrics['removed_validation'] = validation_stats['removed']
+        metrics['final'] = len(df)
+        
+        # Calcular porcentaje retenido
+        if initial_len > 0:
+            metrics['pct_retained'] = (metrics['final'] / initial_len) * 100
+        
+        # Generar columna seq si no existe (REQUISITO: secuencia después del epoch)
+        df = self._ensure_seq_column(df)
+        
+        print(f"    [OK] Snapshots finales: {metrics['final']:,} ({metrics['pct_retained']:.2f}% retenido)")
         
         # Advertencia si queda muy poco
-        if len(df) == 0:
+        if metrics['final'] == 0:
             logger.warning(f"  {mic} has 0 snapshots after cleaning")
-        elif len(df) < len(qte_df) * 0.01:  # Menos del 1%
-            pct = (len(df) / len(qte_df)) * 100
-            logger.warning(f"  {mic} retained only {pct:.2f}% of original data")
+        elif metrics['pct_retained'] < 1.0:
+            logger.warning(f"  {mic} retained only {metrics['pct_retained']:.2f}% of original data")
+        
+        return df, metrics
+    
+    def _ensure_seq_column(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Genera columna seq si no existe para desambiguar timestamps iguales.
+        
+        Args:
+            df: DataFrame con epoch
+            
+        Returns:
+            DataFrame con columna seq añadida si no existía
+        """
+        if 'seq' in df.columns:
+            return df
+        
+        # Intentar usar session e isin si están disponibles
+        grouping_cols = []
+        for col in ['session', 'isin']:
+            if col in df.columns:
+                grouping_cols.append(col)
+        
+        grouping_cols.append('epoch')
+        
+        # Generar seq determinísticamente
+        if len(grouping_cols) > 1:
+            df = df.sort_values(grouping_cols).reset_index(drop=True)
+            df['seq'] = df.groupby(grouping_cols, sort=False).cumcount()
+            logger.debug(f"    Generada columna 'seq' usando groupby({grouping_cols}).cumcount()")
+        else:
+            df = df.sort_values('epoch').reset_index(drop=True)
+            df['seq'] = df.groupby('epoch', sort=False).cumcount()
+            logger.debug(f"    Generada columna 'seq' usando groupby('epoch').cumcount()")
         
         return df
     
     def clean_all_venues(self, venue_data: Dict[str, Dict]) -> Dict[str, pd.DataFrame]:
         """
         Aplica limpieza a todos los venues de un ISIN.
+        MANTIENE COMPATIBILIDAD con código existente.
         
         Args:
             venue_data: Dict {mic: {'qte': df, 'sts': df}}
@@ -353,10 +494,15 @@ class DataCleaner:
         print("=" * 80)
         
         cleaned_data = {}
+        all_metrics = {}
         
         for mic, data_dict in venue_data.items():
             try:
-                cleaned_df = self.clean_venue_data(data_dict, mic)
+                qte_df = data_dict['qte']
+                sts_df = data_dict.get('sts')
+                
+                cleaned_df, metrics = self.clean_venue_data(qte_df, sts_df, mic)
+                all_metrics[mic] = metrics
                 
                 if len(cleaned_df) > 0:
                     cleaned_data[mic] = cleaned_df
@@ -364,9 +510,10 @@ class DataCleaner:
                     logger.warning(f"  {mic} excluded - no data after cleaning")
             
             except Exception as e:
-                logger.error(f"  Error cleaning {mic}: {e}")
-                import traceback
-                logger.debug(traceback.format_exc())
+                logger.error(f"  Error cleaning {mic}: {e}", exc_info=True)
+        
+        # Reportar métricas de calidad agregadas
+        self._report_quality_metrics(all_metrics)
         
         print(f"\n[EXITO] Limpieza completada para {len(cleaned_data)} venues")
         
@@ -374,3 +521,141 @@ class DataCleaner:
             logger.error("  [CRITICO] No venues survived cleaning!")
         
         return cleaned_data
+    
+    def _report_quality_metrics(self, metrics_dict: Dict[str, Dict]) -> None:
+        """
+        Reporta métricas de calidad agregadas para todos los venues.
+        
+        Args:
+            metrics_dict: Dict {mic: métricas}
+        """
+        if not metrics_dict:
+            return
+        
+        total_original = sum(m.get('original', 0) for m in metrics_dict.values())
+        total_final = sum(m.get('final', 0) for m in metrics_dict.values())
+        total_magic = sum(m.get('removed_magic', 0) for m in metrics_dict.values())
+        total_status = sum(m.get('removed_status', 0) for m in metrics_dict.values())
+        total_validation = sum(m.get('removed_validation', 0) for m in metrics_dict.values())
+        
+        if total_original > 0:
+            print(f"\n  [MÉTRICAS DE CALIDAD AGREGADAS]")
+            print(f"    Filas originales: {total_original:,}")
+            print(f"    Eliminadas por magic numbers: {total_magic:,} ({total_magic/total_original*100:.2f}%)")
+            print(f"    Eliminadas por status inválido: {total_status:,} ({total_status/total_original*100:.2f}%)")
+            print(f"    Eliminadas por validaciones: {total_validation:,} ({total_validation/total_original*100:.2f}%)")
+            print(f"    Filas finales: {total_final:,} ({total_final/total_original*100:.2f}% retenido)")
+            
+            logger.info(f"Quality metrics: {total_original:,} → {total_final:,} "
+                       f"({total_final/total_original*100:.2f}% retained)")
+    
+    @staticmethod
+    def get_quality_report(metrics_dict: Dict[str, Dict]) -> pd.DataFrame:
+        """
+        Genera un DataFrame con reporte de calidad para todos los venues.
+        
+        Args:
+            metrics_dict: Dict {mic: métricas}
+            
+        Returns:
+            DataFrame con métricas por venue
+        """
+        if not metrics_dict:
+            return pd.DataFrame()
+        
+        rows = []
+        for mic, metrics in metrics_dict.items():
+            original = metrics.get('original', 0)
+            rows.append({
+                'Venue': mic,
+                'Original': original,
+                'Removed_Magic': metrics.get('removed_magic', 0),
+                'Removed_Status': metrics.get('removed_status', 0),
+                'Removed_Validation': metrics.get('removed_validation', 0),
+                'Final': metrics.get('final', 0),
+                'Pct_Retained': metrics.get('pct_retained', 0.0)
+            })
+        
+        df = pd.DataFrame(rows)
+        return df
+
+
+# ============================================================================
+# FUNCIONES WRAPPER ESTÁTICAS (según especificaciones)
+# ============================================================================
+
+def clean_magic_numbers(df: pd.DataFrame, 
+                        price_columns: List[str] = None) -> pd.DataFrame:
+    """
+    Elimina filas con magic numbers en cualquier columna de precios.
+    
+    Wrapper estático según especificaciones.
+    
+    Args:
+        df: DataFrame con quotes
+        price_columns: Lista de columnas de precios (default: ['px_bid_0', 'px_ask_0'])
+    
+    Returns:
+        DataFrame limpio
+    """
+    cleaner = DataCleaner()
+    df_clean, _ = cleaner.clean_magic_numbers(df, price_columns)
+    return df_clean
+
+
+def filter_by_trading_status(qte_df: pd.DataFrame,
+                             sts_df: pd.DataFrame,
+                             mic: str) -> pd.DataFrame:
+    """
+    Filtra quotes para mantener solo momentos de Continuous Trading.
+    
+    Wrapper estático según especificaciones.
+    
+    Args:
+        qte_df: DataFrame de quotes (ordenado por epoch)
+        sts_df: DataFrame de status (ordenado por epoch)
+        mic: Código del venue
+    
+    Returns:
+        DataFrame filtrado
+    """
+    cleaner = DataCleaner()
+    df_filtered, _ = cleaner.filter_by_trading_status(qte_df, sts_df, mic)
+    return df_filtered
+
+
+def validate_prices(df: pd.DataFrame) -> Tuple[pd.DataFrame, Dict[str, int]]:
+    """
+    Aplica validaciones lógicas de precios y cantidades.
+    
+    Wrapper estático según especificaciones.
+    
+    Args:
+        df: DataFrame con columnas de precios y cantidades
+    
+    Returns:
+        Tuple[DataFrame validado, estadísticas]
+    """
+    cleaner = DataCleaner()
+    return cleaner.validate_prices(df)
+
+
+def clean_venue_data(qte_df: pd.DataFrame,
+                    sts_df: Optional[pd.DataFrame],
+                    mic: str) -> pd.DataFrame:
+    """
+    Aplica todo el pipeline de limpieza en orden.
+    
+    Wrapper estático según especificaciones.
+    
+    Args:
+        qte_df: DataFrame de quotes
+        sts_df: DataFrame de status (opcional)
+        mic: Market Identifier Code
+    
+    Returns:
+        DataFrame limpio listo para consolidación
+    """
+    cleaner = DataCleaner()
+    df_clean, _ = cleaner.clean_venue_data(qte_df, sts_df, mic)
+    return df_clean
