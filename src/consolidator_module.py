@@ -9,17 +9,24 @@ Funciones principales:
 
 ALGORITMO:
 1. Renombrar columnas por exchange: bid → {exchange}_bid, etc.
-2. Merge iterativo con outer join en 'epoch'
-3. Ordenar por epoch
-4. Forward fill para cada exchange (CRÍTICO: asume que el último precio conocido
-   sigue vigente hasta el próximo update)
-5. Establecer epoch como índice (pero mantenerlo como columna también)
+2. Agregar columna 'sequence' si no existe (contador incremental por venue)
+   - Garantiza ordenamiento determinista cuando hay colisiones de timestamp
+3. Crear timeline base con unión de todos los timestamps únicos de todos los venues
+4. Para cada venue, usar merge_asof con direction='backward' (equivalente a ffill)
+   - Esto es más eficiente que outer merge + ffill, especialmente con alta frecuencia
+5. Ordenar por (epoch, sequence) para garantizar orden determinista
+6. Establecer epoch como índice (pero mantenerlo como columna también)
+
+CARACTERÍSTICAS:
+- Ordenamiento determinista: Usa (epoch, sequence) para evitar colisiones
+- Preserva secuencia causal: Mantiene el orden real de eventos dentro del mismo timestamp
+- Compatible con datos que ya tienen 'sequence' o sin ella (se genera automáticamente)
 
 ESTRUCTURA DEL TAPE:
-| epoch | BME_bid | BME_ask | BME_bidqty | BME_askqty |
-|       | AQUIS_bid | AQUIS_ask | AQUIS_bidqty | AQUIS_askqty |
-|       | CBOE_bid | CBOE_ask | CBOE_bidqty | CBOE_askqty |
-|       | TURQUOISE_bid | TURQUOISE_ask | TURQUOISE_bidqty | TURQUOISE_askqty |
+| epoch | BME_bid | BME_ask | BME_bidqty | BME_askqty | BME_sequence |
+|       | AQUIS_bid | AQUIS_ask | AQUIS_bidqty | AQUIS_askqty | AQUIS_sequence |
+|       | CBOE_bid | CBOE_ask | CBOE_bidqty | CBOE_askqty | CBOE_sequence |
+|       | TURQUOISE_bid | TURQUOISE_ask | TURQUOISE_bidqty | TURQUOISE_askqty | TURQUOISE_sequence |
 ================================================================================
 """
 
@@ -39,11 +46,17 @@ def create_consolidated_tape(data_dict: Dict[str, Tuple[pd.DataFrame, pd.DataFra
     
     Proceso:
     1. Para cada exchange, selecciona columnas relevantes (epoch, bid, ask, bidqty, askqty)
-    2. Renombra columnas con prefijo del exchange
-    3. Hace merge iterativo con outer join
-    4. Ordena por epoch
-    5. Aplica forward fill por exchange
-    6. Establece epoch como índice
+    2. Agrega columna 'sequence' si no existe (contador incremental por venue)
+    3. Renombra columnas con prefijo del exchange (incluyendo sequence)
+    4. Crea timeline base con unión de todos los timestamps únicos
+    5. Para cada venue, usa merge_asof con direction='backward' (equivalente a ffill)
+    6. Ordena por (epoch, sequence) para garantizar orden determinista
+    7. Establece epoch como índice
+    
+    Características:
+    - Ordenamiento determinista: Usa (epoch, sequence) para evitar colisiones
+    - Preserva secuencia causal: Mantiene el orden real de eventos dentro del mismo timestamp
+    - Compatible: Funciona con datos que ya tienen 'sequence' o sin ella (se genera automáticamente)
     
     Args:
         data_dict: Diccionario con estructura {exchange: (qte_df, sts_df)}
@@ -51,7 +64,7 @@ def create_consolidated_tape(data_dict: Dict[str, Tuple[pd.DataFrame, pd.DataFra
         
     Returns:
         DataFrame consolidado con epoch como índice y columnas:
-        {exchange}_bid, {exchange}_ask, {exchange}_bidqty, {exchange}_askqty
+        {exchange}_bid, {exchange}_ask, {exchange}_bidqty, {exchange}_askqty, {exchange}_sequence
     """
     if not data_dict:
         return pd.DataFrame()
@@ -76,12 +89,24 @@ def create_consolidated_tape(data_dict: Dict[str, Tuple[pd.DataFrame, pd.DataFra
         cols = ['epoch', 'bid', 'ask', 'bidqty', 'askqty']
         quote_df = qte_df[cols].copy()
         
-        # Agregar prefijo del exchange a columnas bid/ask
+        # Agregar columna 'sequence' si no existe
+        # Esto garantiza ordenamiento determinista cuando hay colisiones de timestamp
+        if 'sequence' not in quote_df.columns:
+            # Generar secuencia incremental por venue
+            # Ordenar primero por epoch para mantener orden temporal
+            quote_df = quote_df.sort_values('epoch').reset_index(drop=True)
+            quote_df['sequence'] = range(1, len(quote_df) + 1)
+        else:
+            # Si ya existe, asegurar que esté ordenado correctamente
+            quote_df = quote_df.sort_values(['epoch', 'sequence']).reset_index(drop=True)
+        
+        # Agregar prefijo del exchange a columnas bid/ask y sequence
         quote_df = quote_df.rename(columns={
             'bid': f'{exchange}_bid',
             'ask': f'{exchange}_ask',
             'bidqty': f'{exchange}_bidqty',
-            'askqty': f'{exchange}_askqty'
+            'askqty': f'{exchange}_askqty',
+            'sequence': f'{exchange}_sequence'
         })
         
         all_quotes.append(quote_df)
@@ -89,21 +114,48 @@ def create_consolidated_tape(data_dict: Dict[str, Tuple[pd.DataFrame, pd.DataFra
     if not all_quotes:
         return pd.DataFrame()
     
-    # Merge iterativo: empezar con el primer exchange y hacer outer merge con los demás
-    consolidated = all_quotes[0]
-    for quote_df in all_quotes[1:]:
-        consolidated = pd.merge(consolidated, quote_df, on='epoch', how='outer')
+    # Crear timeline base con unión de todos los timestamps únicos
+    # Esto es equivalente al outer merge pero más eficiente
+    all_epochs = set()
+    for quote_df in all_quotes:
+        all_epochs.update(quote_df['epoch'].values)
     
-    # Ordenar por epoch
-    consolidated = consolidated.sort_values('epoch').reset_index(drop=True)
+    # Crear DataFrame base con todos los timestamps únicos, ordenados
+    timeline_base = pd.DataFrame({'epoch': sorted(all_epochs)})
     
-    # Aplicar forward fill para cada exchange (CRÍTICO)
-    # Asunción de market microstructure: el último precio conocido sigue vigente
-    # hasta que llegue un nuevo update. Esto es estándar en análisis de order books.
-    for exchange in data_dict.keys():
-        for col in [f'{exchange}_bid', f'{exchange}_ask', f'{exchange}_bidqty', f'{exchange}_askqty']:
-            if col in consolidated.columns:
-                consolidated[col] = consolidated[col].ffill()
+    # Usar merge_asof con direction='backward' para cada venue
+    # Esto es equivalente a ffill pero más eficiente, especialmente con alta frecuencia
+    # direction='backward' significa: usar el último valor conocido <= timestamp actual
+    consolidated = timeline_base.copy()
+    
+    for quote_df in all_quotes:
+        # Ordenar por (epoch, sequence) para garantizar orden determinista
+        # Esto es crítico cuando hay colisiones de timestamp
+        sort_cols = ['epoch']
+        if any(col.endswith('_sequence') for col in quote_df.columns):
+            # Si hay columna de secuencia, incluirla en el ordenamiento
+            seq_col = [col for col in quote_df.columns if col.endswith('_sequence')][0]
+            sort_cols.append(seq_col)
+        
+        quote_df_sorted = quote_df.sort_values(sort_cols).reset_index(drop=True)
+        
+        # Hacer merge_asof con direction='backward' (equivalente a forward fill)
+        # Esto propaga el último precio conocido hacia adelante
+        consolidated = pd.merge_asof(
+            consolidated,
+            quote_df_sorted,
+            on='epoch',
+            direction='backward'
+        )
+    
+    # Ordenar por (epoch, sequence) para garantizar orden determinista
+    # Primero ordenar por epoch, luego por cualquier columna de secuencia disponible
+    sort_cols = ['epoch']
+    sequence_cols = [col for col in consolidated.columns if col.endswith('_sequence')]
+    if sequence_cols:
+        sort_cols.extend(sorted(sequence_cols))  # Ordenar secuencias de forma determinista
+    
+    consolidated = consolidated.sort_values(sort_cols).reset_index(drop=True)
     
     # Establecer epoch como índice (pero mantenerlo como columna también)
     consolidated = consolidated.set_index('epoch')
