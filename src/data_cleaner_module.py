@@ -48,6 +48,38 @@ logger = logging.getLogger(__name__)
 MAX_REASONABLE_PRICE = config.MAX_REASONABLE_PRICE
 
 
+# ============================================================================
+# FUNCIONES COMPATIBLES CON EL OTRO CÓDIGO
+# ============================================================================
+
+def is_valid_price(price: float) -> bool:
+    """Check if a price is valid (not NaN, not a magic number, and > 0)."""
+    if pd.isna(price) or price <= 0:
+        return False
+    if price in config.MAGIC_NUMBERS:
+        return False
+    return True
+
+
+def filter_valid_prices(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Filter rows where both bid and ask prices are valid.
+    Usa nombres originales: px_bid_0, px_ask_0
+    """
+    if df.empty:
+        return df
+    
+    # Usar nombres originales
+    if 'px_bid_0' not in df.columns or 'px_ask_0' not in df.columns:
+        return df
+    
+    mask = df.apply(
+        lambda row: is_valid_price(row.get('px_bid_0')) and is_valid_price(row.get('px_ask_0')),
+        axis=1
+    )
+    return df[mask].copy()
+
+
 class DataCleaner:
     """
     Clase responsable de aplicar filtros de calidad de datos según especificaciones del vendor.
@@ -74,17 +106,18 @@ class DataCleaner:
         Args:
             df: DataFrame con quotes
             price_columns: Lista de columnas de precios a verificar
-                          (default: ['px_bid_0', 'px_ask_0'])
+                          (default: detecta automáticamente bid/ask o px_bid_0/px_ask_0)
         
         Returns:
             Tuple[DataFrame limpio, número de filas eliminadas]
         """
-        if price_columns is None:
-            price_columns = ['px_bid_0', 'px_ask_0']
-        
         initial_len = len(df)
         if initial_len == 0:
             return df, 0
+        
+        # Usar nombres originales
+        if price_columns is None:
+            price_columns = ['px_bid_0', 'px_ask_0']
         
         # Verificar que las columnas existen
         available_cols = [col for col in price_columns if col in df.columns]
@@ -125,6 +158,14 @@ class DataCleaner:
         if initial_len == 0:
             return df, {'removed': 0, 'pct_removed': 0.0}
         
+        # Usar nombres originales
+        required_cols = ['px_bid_0', 'px_ask_0', 'qty_bid_0', 'qty_ask_0']
+        missing_cols = [col for col in required_cols if col not in df.columns]
+        
+        if missing_cols:
+            logger.warning(f"    Faltan columnas para validación: {missing_cols}")
+            return df, {'removed': 0, 'pct_removed': 0.0}
+        
         # Máscara combinada optimizada (una sola pasada)
         # Validaciones: positivos, no NaN, spread válido, precio razonable
         mask = (
@@ -151,7 +192,7 @@ class DataCleaner:
             logger.info(f"    Removed {removed:,} invalid prices ({stats['pct_removed']:.2f}%)")
             # Desglose de razones (opcional, solo si hay muchas eliminaciones)
             if removed > initial_len * 0.1:  # Más del 10% eliminado
-                crossed = ((df['px_bid_0'] >= df['px_ask_0']).sum() if 'px_bid_0' in df.columns else 0)
+                crossed = ((df['px_bid_0'] >= df['px_ask_0']).sum() if 'px_bid_0' in df.columns and 'px_ask_0' in df.columns else 0)
                 too_high = ((df['px_bid_0'] >= MAX_REASONABLE_PRICE).sum() if 'px_bid_0' in df.columns else 0)
                 if crossed > 0:
                     logger.warning(f"      - Crossed books: {crossed:,}")
@@ -189,15 +230,16 @@ class DataCleaner:
         initial_len = len(qte_df)
         
         # Validar datos de entrada (early exit)
+        # CRÍTICO: Si no hay STS, mantener todos los datos (igual que código de referencia)
         if sts_df is None or len(sts_df) == 0:
-            logger.warning(f"    No STS data for {mic}, skipping status filter")
+            logger.warning(f"    No STS data for {mic}, skipping status filter (manteniendo todos los datos)")
             return qte_df, 0
         
         if mic not in config.VALID_STATES:
             logger.warning(f"    Unknown MIC {mic}, skipping status filter")
             return qte_df, 0
         
-        # Verificar si la columna existe
+        # Usar 'market_trading_status' (nombre original)
         if 'market_trading_status' not in sts_df.columns:
             logger.warning(f"    Column 'market_trading_status' not found in STS for {mic}")
             return qte_df, 0
@@ -265,25 +307,51 @@ class DataCleaner:
         logger.info(f"    Snapshots con estado asignado: {snapshots_with_status:,} ({snapshots_with_status/initial_len*100:.2f}%)")
         logger.info(f"    Snapshots sin estado asignado: {snapshots_without_status:,} ({snapshots_without_status/initial_len*100:.2f}%)")
         
-        # CRÍTICO: Eliminar snapshots sin estado asignado (no sabemos si son continuous trading)
-        # Si no hay estado, no podemos garantizar que sea continuous trading
-        # PERO: Si eliminamos todos los datos, mejor mantenerlos sin filtrar para no perder señales
+        # CRÍTICO: Manejar snapshots sin estado asignado
+        # El código de referencia mantiene los datos si no hay estado asignado
+        # Solo filtramos los que tienen estado asignado Y son válidos
         merged_with_status = merged[merged['market_trading_status'].notna()].copy()
         
         if len(merged_with_status) == 0:
-            logger.error(f"    [CRÍTICO] Ningún snapshot tiene estado asignado después del merge_asof para {mic}")
-            logger.error(f"    Esto puede indicar que los timestamps de QTE y STS no coinciden")
-            logger.error(f"    OPCIONES:")
-            logger.error(f"      1. Mantener datos sin filtrar (puede incluir non-trading)")
-            logger.error(f"      2. Eliminar todos los datos (pérdida total de señales)")
-            logger.error(f"    Eligiendo opción 1: Manteniendo datos originales sin filtrar")
-            logger.warning(f"    ⚠️ ADVERTENCIA: Esto puede incluir snapshots de non-trading, pero evita pérdida total")
+            # Si ningún snapshot tiene estado asignado, mantener todos los datos sin filtrar
+            # (igual que el código de referencia cuando hay errores)
+            logger.warning(f"    Ningún snapshot tiene estado asignado después del merge_asof para {mic}")
+            logger.warning(f"    Manteniendo datos originales sin filtrar (igual que código de referencia)")
             return qte_df, 0
         
-        # Filtrar por códigos válidos de continuous trading
-        merged_filtered = merged_with_status[
-            merged_with_status['market_trading_status'].isin(matching_codes)
-        ].copy()
+        # Si hay algunos con estado pero no todos, mantener los que tienen estado válido
+        # y también los que no tienen estado (asumimos que son válidos si no hay estado)
+        # Esto es más conservador y evita perder oportunidades
+        snapshots_without_status = merged[merged['market_trading_status'].isna()].copy()
+        
+        # Filtrar solo los que tienen estado asignado por códigos válidos
+        # Los que no tienen estado los mantenemos (asumimos válidos)
+        
+        # Filtrar por códigos válidos de continuous trading (solo los que tienen estado asignado)
+        # Handle both numeric and string status codes
+        if pd.api.types.is_numeric_dtype(merged_with_status['market_trading_status']):
+            # Direct numeric comparison (more efficient)
+            mask = merged_with_status['market_trading_status'].isin(matching_codes)
+        else:
+            # If status is string, convert both to string for comparison
+            merged_with_status['status_str'] = merged_with_status['market_trading_status'].astype(str)
+            valid_codes_str = [str(s) for s in matching_codes]
+            mask = merged_with_status['status_str'].isin(valid_codes_str)
+            merged_with_status = merged_with_status.drop(columns=['status_str'])
+        
+        # Filtrar solo los que tienen estado válido
+        merged_filtered_valid = merged_with_status[mask].copy()
+        
+        # Combinar: los que tienen estado válido + los que no tienen estado (asumimos válidos)
+        # Esto es más conservador y evita perder oportunidades cuando no hay estado disponible
+        if len(snapshots_without_status) > 0:
+            # Eliminar columna de status de los que no tienen estado antes de combinar
+            if 'market_trading_status' in snapshots_without_status.columns:
+                snapshots_without_status = snapshots_without_status.drop('market_trading_status', axis=1)
+            merged_filtered = pd.concat([merged_filtered_valid, snapshots_without_status], ignore_index=True)
+            merged_filtered = merged_filtered.sort_values('epoch').reset_index(drop=True)
+        else:
+            merged_filtered = merged_filtered_valid
         
         # DIAGNÓSTICO: Verificar distribución de estados
         if 'market_trading_status' in merged_with_status.columns:
@@ -559,7 +627,7 @@ def clean_magic_numbers(df: pd.DataFrame,
     
     Args:
         df: DataFrame con quotes
-        price_columns: Lista de columnas de precios (default: ['px_bid_0', 'px_ask_0'])
+        price_columns: Lista de columnas de precios (default: detecta automáticamente bid/ask o px_bid_0/px_ask_0)
     
     Returns:
         DataFrame limpio

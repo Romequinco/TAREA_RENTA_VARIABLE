@@ -328,28 +328,55 @@ class DataLoader:
             ]
             
             # Convertir todas las columnas de una vez (más eficiente que columna por columna)
+            # IMPORTANTE: Usar assign para evitar problemas con índices o pérdida de columnas
             if price_qty_cols:
-                df[price_qty_cols] = df[price_qty_cols].apply(
-                    pd.to_numeric, errors='coerce', downcast='float'
-                ).astype('float64')
+                for col in price_qty_cols:
+                    if col in df.columns:
+                        df[col] = pd.to_numeric(df[col], errors='coerce').astype('float64')
             
             # Validaciones y filtros (optimizado: una sola pasada)
+            # MANTENER nombres originales: px_bid_0, px_ask_0, qty_bid_0, qty_ask_0
             initial_len = len(df)
             
             # Filtro combinado: precios > 0 y spread válido
-            mask = (
-                (df['px_bid_0'] > 0) & 
-                (df['px_ask_0'] > 0) &
-                (df['qty_bid_0'] > 0) &
-                (df['qty_ask_0'] > 0) &
-                (df['px_ask_0'] >= df['px_bid_0'])
-            )
+            if all(col in df.columns for col in ['px_bid_0', 'px_ask_0', 'qty_bid_0', 'qty_ask_0']):
+                mask = (
+                    (df['px_bid_0'] > 0) & 
+                    (df['px_ask_0'] > 0) &
+                    (df['qty_bid_0'] > 0) &
+                    (df['qty_ask_0'] > 0) &
+                    (df['px_ask_0'] >= df['px_bid_0'])
+                )
+            else:
+                mask = pd.Series([True] * len(df), index=df.index)
             
             invalid_count = (~mask).sum()
             if invalid_count > 0:
-                if (df['px_ask_0'] < df['px_bid_0']).any():
+                if all(col in df.columns for col in ['px_ask_0', 'px_bid_0']) and (df['px_ask_0'] < df['px_bid_0']).any():
                     logger.warning(f"  [ADVERTENCIA] {invalid_count} filas con datos inválidos")
-                df = df[mask]
+                df = df[mask].copy()  # Usar .copy() para evitar warnings
+            
+            # Debug: verificar que las columnas siguen después del filtrado
+            logger.debug(f"  [DEBUG] Después del filtrado: {len(df)} filas, columnas: {list(df.columns)[:10]}")
+            
+            # Verificar que las columnas requeridas siguen existiendo
+            required_cols_check = ['epoch', 'px_bid_0', 'px_ask_0', 'qty_bid_0', 'qty_ask_0']
+            missing_after_filter = [col for col in required_cols_check if col not in df.columns]
+            if missing_after_filter:
+                logger.error(f"  [ERROR CRÍTICO] {filepath.name}: Columnas eliminadas después del filtrado: {missing_after_filter}")
+                logger.error(f"  Columnas disponibles: {list(df.columns)}")
+                # Asegurar que las columnas requeridas existan antes de retornar
+                for col in missing_after_filter:
+                    if col not in df.columns:
+                        logger.error(f"  [ERROR] Columna {col} no encontrada después de todas las operaciones")
+                        return None
+            
+            # Verificación final: asegurar que el DataFrame tiene las columnas requeridas
+            if not all(col in df.columns for col in required_cols_check):
+                logger.error(f"  [ERROR CRÍTICO] {filepath.name}: DataFrame no tiene todas las columnas requeridas")
+                logger.error(f"  Columnas requeridas: {required_cols_check}")
+                logger.error(f"  Columnas disponibles: {list(df.columns)}")
+                return None
             
             logger.info(f"  [OK] {filepath.name}: {len(df):,} filas válidas (de {initial_len:,})")
             return df
@@ -375,10 +402,11 @@ class DataLoader:
             if df is None:
                 return None
             
-            # Convertir market_trading_status
-            df['market_trading_status'] = pd.to_numeric(
-                df['market_trading_status'], errors='coerce'
-            ).astype('Int64')
+            # Convertir market_trading_status (mantener nombre original)
+            if 'market_trading_status' in df.columns:
+                df['market_trading_status'] = pd.to_numeric(
+                    df['market_trading_status'], errors='coerce'
+                ).astype('Int64')
             
             logger.info(f"  [OK] {filepath.name}: {len(df):,} filas")
             return df
@@ -432,7 +460,8 @@ class DataLoader:
             print(f"Total filas (muestra): {len(df)}")
             
             print(f"\nColumnas requeridas:")
-            for col in self.QTE_REQUIRED:
+            required_cols = ['epoch', 'px_bid_0', 'px_ask_0', 'qty_bid_0', 'qty_ask_0']
+            for col in required_cols:
                 status = "[OK]" if col in df.columns else "[FALTA]"
                 print(f"  {status} {col}")
             
@@ -440,7 +469,7 @@ class DataLoader:
             print(list(df.columns[:5]))
             
             print(f"\nPrimeras 3 filas (columnas relevantes):")
-            available_cols = [col for col in self.QTE_REQUIRED if col in df.columns]
+            available_cols = [col for col in required_cols if col in df.columns]
             if available_cols:
                 print(df[available_cols].head(3).to_string())
             
@@ -568,12 +597,47 @@ class DataLoader:
     def _add_identity_columns(self, df: pd.DataFrame, session: str, isin: str, 
                              ticker: str, mic: str) -> pd.DataFrame:
         """Añade columnas de Book Identity Key de forma eficiente."""
+        # Verificar que df es un DataFrame válido
+        if not isinstance(df, pd.DataFrame):
+            logger.error(f"  [ERROR] _add_identity_columns recibió un objeto que no es DataFrame: {type(df)}")
+            return df
+        
+        # Verificar que el DataFrame tiene columnas
+        if df.columns is None or len(df.columns) == 0:
+            logger.error(f"  [ERROR] DataFrame no tiene columnas")
+            return df
+        
+        # Añadir columnas de identidad si no existen
         if 'session' not in df.columns:
             df = df.copy()  # Solo copiar si es necesario
             df['session'] = session
             df['isin'] = isin
             df['ticker'] = ticker
             df['mic'] = mic
+        else:
+            # Si ya existen, asegurar que tienen los valores correctos
+            df = df.copy()
+            df['session'] = session
+            df['isin'] = isin
+            df['ticker'] = ticker
+            df['mic'] = mic
+        
+        # Verificación final: asegurar que las columnas requeridas siguen existiendo
+        # NOTA: Solo verificar columnas QTE si el DataFrame es de tipo QTE (tiene px_bid_0)
+        # Los DataFrames STS no tienen estas columnas y eso es normal
+        if 'px_bid_0' in df.columns:
+            # Es un DataFrame QTE, verificar columnas QTE requeridas
+            required_cols_check = ['epoch', 'px_bid_0', 'px_ask_0', 'qty_bid_0', 'qty_ask_0']
+            missing = [col for col in required_cols_check if col not in df.columns]
+            if missing:
+                logger.error(f"  [ERROR CRÍTICO] _add_identity_columns (QTE): Columnas perdidas: {missing}")
+                logger.error(f"  Columnas disponibles: {list(df.columns)[:30]}")
+        elif 'market_trading_status' in df.columns:
+            # Es un DataFrame STS, solo verificar epoch
+            if 'epoch' not in df.columns:
+                logger.error(f"  [ERROR CRÍTICO] _add_identity_columns (STS): Falta columna epoch")
+                logger.error(f"  Columnas disponibles: {list(df.columns)[:30]}")
+        
         return df
     
     def load_data_for_isin(self, session: str, isin: str) -> Dict[str, Dict]:
@@ -666,16 +730,47 @@ class DataLoader:
         """
         Validación post-carga optimizada.
         Early exit para mejor rendimiento.
+        NOTA: Las columnas deben ser: epoch, px_bid_0, px_ask_0, qty_bid_0, qty_ask_0 (nombres originales)
         """
         # Validar QTE (early exit)
         if qte_df is None or len(qte_df) == 0:
             logger.error(f"  [VALIDACION] {mic}: QTE vacío")
             return False
         
-        # Verificar columnas requeridas (optimizado: usar set)
-        if not set(self.QTE_REQUIRED).issubset(qte_df.columns):
-            missing = set(self.QTE_REQUIRED) - set(qte_df.columns)
-            logger.error(f"  [VALIDACION] {mic}: Faltan columnas QTE: {missing}")
+        # Verificar columnas requeridas (nombres originales)
+        # Las columnas son: epoch, px_bid_0, px_ask_0, qty_bid_0, qty_ask_0
+        required_cols = ['epoch', 'px_bid_0', 'px_ask_0', 'qty_bid_0', 'qty_ask_0']
+        
+        # Debug: mostrar todas las columnas disponibles
+        available_cols = list(qte_df.columns)
+        logger.info(f"  [DEBUG] {mic}: Columnas disponibles en QTE: {available_cols[:20]}")
+        logger.info(f"  [DEBUG] {mic}: Total columnas: {len(available_cols)}")
+        logger.info(f"  [DEBUG] {mic}: Filas en QTE: {len(qte_df)}")
+        
+        # Verificar que qte_df es un DataFrame válido
+        if not isinstance(qte_df, pd.DataFrame):
+            logger.error(f"  [VALIDACION] {mic}: qte_df no es un DataFrame válido (tipo: {type(qte_df)})")
+            return False
+        
+        # Verificar columnas requeridas - usar verificación más robusta
+        missing = []
+        for col in required_cols:
+            if col not in qte_df.columns:
+                missing.append(col)
+        
+        if missing:
+            logger.error(f"  [VALIDACION] {mic}: Faltan columnas QTE: {set(missing)}")
+            logger.error(f"  [VALIDACION] {mic}: Columnas disponibles (primeras 30): {available_cols[:30]}")
+            logger.error(f"  [DEBUG] {mic}: ¿Tiene epoch? {('epoch' in qte_df.columns)}")
+            logger.error(f"  [DEBUG] {mic}: ¿Tiene px_bid_0? {('px_bid_0' in qte_df.columns)}")
+            logger.error(f"  [DEBUG] {mic}: ¿Tiene px_ask_0? {('px_ask_0' in qte_df.columns)}")
+            logger.error(f"  [DEBUG] {mic}: ¿Tiene qty_bid_0? {('qty_bid_0' in qte_df.columns)}")
+            logger.error(f"  [DEBUG] {mic}: ¿Tiene qty_ask_0? {('qty_ask_0' in qte_df.columns)}")
+            # Mostrar todas las columnas que contienen 'px_' o 'qty_' para debugging
+            px_cols = [c for c in available_cols if 'px_' in c]
+            qty_cols = [c for c in available_cols if 'qty_' in c]
+            logger.error(f"  [DEBUG] {mic}: Columnas con 'px_': {px_cols[:10]}")
+            logger.error(f"  [DEBUG] {mic}: Columnas con 'qty_': {qty_cols[:10]}")
             return False
         
         # Verificar epoch (optimizado: una sola verificación)
@@ -685,8 +780,9 @@ class DataLoader:
         
         # Validar STS si existe (solo warnings, no bloquea)
         if sts_df is not None and len(sts_df) > 0:
-            if not set(self.STS_REQUIRED).issubset(sts_df.columns):
-                missing = set(self.STS_REQUIRED) - set(sts_df.columns)
+            sts_cols_needed = ['epoch', 'market_trading_status']
+            if not set(sts_cols_needed).issubset(sts_df.columns):
+                missing = set(sts_cols_needed) - set(sts_df.columns)
                 logger.warning(f"  [VALIDACION] {mic}: Faltan columnas STS: {missing}")
             
             if sts_df['epoch'].dtype != 'int64' or sts_df['epoch'].isna().any():

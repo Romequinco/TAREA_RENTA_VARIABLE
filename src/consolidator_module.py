@@ -78,11 +78,13 @@ class ConsolidatedTape:
         Returns:
             DataFrame con columnas renombradas
         """
+        # Usar nombres originales: px_bid_0, px_ask_0, qty_bid_0, qty_ask_0
+        # Formato igual que el código de referencia: _bidqty y _askqty (sin guión bajo antes de qty)
         rename_map = {
             'px_bid_0': f'{venue_name}_bid',
             'px_ask_0': f'{venue_name}_ask',
-            'qty_bid_0': f'{venue_name}_bid_qty',
-            'qty_ask_0': f'{venue_name}_ask_qty'
+            'qty_bid_0': f'{venue_name}_bidqty',  # Formato del código de referencia
+            'qty_ask_0': f'{venue_name}_askqty'   # Formato del código de referencia
         }
         
         # Solo renombrar columnas que existen
@@ -94,7 +96,7 @@ class ConsolidatedTape:
         
         df = df.rename(columns=existing_rename)
         
-        # Seleccionar solo columnas necesarias
+        # Seleccionar solo columnas necesarias (igual que el otro código: epoch, bid, ask, bidqty, askqty)
         cols_to_keep = ['epoch'] + list(existing_rename.values())
         available_cols = [c for c in cols_to_keep if c in df.columns]
         
@@ -137,14 +139,10 @@ class ConsolidatedTape:
         # Ordenar por timestamp (crítico para merge)
         df = df.sort_values('epoch').reset_index(drop=True)
         
-        # Eliminar duplicados en el mismo timestamp (tomar último)
-        # CRÍTICO: Solo eliminar si hay duplicados reales, no eliminar filas válidas
-        if df['epoch'].duplicated().any():
-            rows_before_dedup = len(df)
-            df = df.drop_duplicates(subset=['epoch'], keep='last')
-            removed_dups = rows_before_dedup - len(df)
-            if removed_dups > 0:
-                logger.debug(f"    Eliminados {removed_dups} duplicados en mismo epoch para {venue_name}")
+        # NOTA: El código de referencia NO elimina duplicados antes del merge
+        # Mantiene todos los timestamps, incluso si hay duplicados
+        # Esto puede crear más filas en el consolidated tape final
+        # No eliminamos duplicados aquí para mantener consistencia con el código de referencia
         
         return df
     
@@ -219,14 +217,14 @@ class ConsolidatedTape:
                 print(f"ERROR")
                 continue
         
-        # PASO 3: Ordenar por timestamp
+        # PASO 3: Ordenar por timestamp (igual que código de referencia: después del merge)
         consolidated = consolidated.sort_values('epoch').reset_index(drop=True)
         
         print(f"\n  [OK] Tape consolidado creado: {consolidated.shape}")
         print(f"    - Timestamps únicos: {len(consolidated):,}")
         print(f"    - Columnas totales: {len(consolidated.columns)}")
         
-        # PASO 4: Forward Fill (CRÍTICO)
+        # PASO 4: Forward Fill (CRÍTICO) - Igual que el código de referencia
         # CRÍTICO: Asunción de market microstructure - el último precio conocido sigue vigente
         # hasta que llegue un nuevo update. Esto es estándar en análisis de order books.
         # Sin forward fill, tendríamos NaNs en cada timestamp donde un venue no actualiza,
@@ -240,19 +238,23 @@ class ConsolidatedTape:
             logger.warning("  ⚠️ ADVERTENCIA: Epoch no es monotónico antes de forward fill, ordenando...")
             consolidated = consolidated.sort_values('epoch').reset_index(drop=True)
         
-        # Forward fill: Propagar último valor conocido hacia adelante
-        # Ejemplo: Si XMAD actualiza en T=100 y T=200, el precio en T=150 será el de T=100
-        # CRÍTICO: Usar limit=None para propagar hasta el final (sin límite)
-        # Esto asegura que todos los NaNs se rellenen si hay al menos un valor previo
-        consolidated = consolidated.ffill(limit=None)
+        # Forward fill por exchange
+        # Aplicar forward fill para cada exchange's columns específicamente
+        # Manejar ambos formatos: _bidqty/_askqty (código de referencia) y _bid_qty/_ask_qty (compatibilidad)
+        for exchange in venue_names:
+            for col in [f'{exchange}_bid', f'{exchange}_ask', 
+                       f'{exchange}_bidqty', f'{exchange}_askqty',  # Formato del código de referencia
+                       f'{exchange}_bid_qty', f'{exchange}_ask_qty']:  # Formato alternativo para compatibilidad
+                if col in consolidated.columns:
+                    consolidated[col] = consolidated[col].ffill()
         
         nans_after = consolidated.isna().sum().sum()
         print(f"    NaNs después: {nans_after:,}")
         
-        # Intentar backward fill si quedan NaNs (solo primeras filas)
-        if nans_after > 0:
-            consolidated = consolidated.bfill(limit=None)
-            nans_after = consolidated.isna().sum().sum()
+        # Set epoch as index (but keep it as a column too) - Igual que el otro código
+        if consolidated.index.name != 'epoch':
+            consolidated = consolidated.set_index('epoch')
+        consolidated['epoch'] = consolidated.index
         
         # PASO 5: Eliminar primeras filas con NaNs
         # CRÍTICO: Solo eliminar filas donde TODOS los venues tienen NaN

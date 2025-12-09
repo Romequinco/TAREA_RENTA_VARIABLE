@@ -38,6 +38,134 @@ from config_module import config
 logger = logging.getLogger(__name__)
 
 
+# ============================================================================
+# FUNCIONES COMPATIBLES CON EL OTRO CÓDIGO
+# ============================================================================
+
+def get_quote_at_epoch(consolidated: pd.DataFrame, target_epoch: int, method: str = 'nearest') -> Optional[pd.Series]:
+    """
+    Efficiently query the consolidated tape at a specific epoch.
+    Igual que el otro código.
+    """
+    if consolidated.empty:
+        return None
+    
+    # Ensure consolidated is indexed by epoch
+    if consolidated.index.name != 'epoch':
+        consolidated = consolidated.set_index('epoch')
+    
+    if method == 'nearest':
+        # Use searchsorted for efficient lookup
+        idx = np.searchsorted(consolidated.index, target_epoch, side='left')
+        
+        # Handle edge cases
+        if idx == 0:
+            return consolidated.iloc[0]
+        elif idx >= len(consolidated):
+            return consolidated.iloc[-1]
+        else:
+            # Choose nearest
+            left_epoch = consolidated.index[idx - 1]
+            right_epoch = consolidated.index[idx]
+            
+            if abs(target_epoch - left_epoch) <= abs(target_epoch - right_epoch):
+                return consolidated.iloc[idx - 1]
+            else:
+                return consolidated.iloc[idx]
+    
+    return None
+
+
+def is_valid_price(price: float) -> bool:
+    """Check if a price is valid (not NaN, not a magic number, and > 0)."""
+    if pd.isna(price) or price <= 0:
+        return False
+    if price in config.MAGIC_NUMBERS:
+        return False
+    return True
+
+
+def simulate_latency_with_losses(opportunities: pd.DataFrame, consolidated: pd.DataFrame, latency_us: int) -> float:
+    """
+    Simulate execution latency, calculating profit/loss at T + Latency.
+    Includes both profits and losses.
+    Igual que el otro código.
+    """
+    if opportunities.empty or consolidated.empty:
+        return 0.0
+    
+    # Work with copies
+    opps = opportunities.copy()
+    
+    # Ensure consolidated is indexed by epoch
+    if consolidated.index.name != 'epoch':
+        consolidated = consolidated.set_index('epoch')
+    
+    total_profit = 0.0
+    
+    for _, opp in opps.iterrows():
+        original_epoch = opp['epoch']
+        target_epoch = original_epoch + latency_us
+        
+        # Get quote at T + latency
+        quote_at_latency = get_quote_at_epoch(consolidated, target_epoch)
+        
+        if quote_at_latency is None:
+            continue
+        
+        # Get prices from the specific exchanges at T + latency
+        buy_exchange = opp['buy_exchange']
+        sell_exchange = opp['sell_exchange']
+        
+        buy_price_col = f'{buy_exchange}_ask'
+        sell_price_col = f'{sell_exchange}_bid'
+        buy_qty_col = f'{buy_exchange}_ask_qty'
+        sell_qty_col = f'{sell_exchange}_bid_qty'
+        
+        if buy_price_col not in quote_at_latency.index or sell_price_col not in quote_at_latency.index:
+            continue
+        
+        buy_price = quote_at_latency[buy_price_col]
+        sell_price = quote_at_latency[sell_price_col]
+        
+        # Check if prices are valid
+        if pd.isna(buy_price) or pd.isna(sell_price):
+            continue
+        
+        if not is_valid_price(buy_price) or not is_valid_price(sell_price):
+            continue
+        
+        # Get quantities
+        sell_qty = quote_at_latency.get(sell_qty_col, 0) if sell_qty_col in quote_at_latency.index else 0
+        buy_qty = quote_at_latency.get(buy_qty_col, 0) if buy_qty_col in quote_at_latency.index else 0
+        
+        if pd.isna(sell_qty) or sell_qty <= 0:
+            sell_qty = 0
+        if pd.isna(buy_qty) or buy_qty <= 0:
+            buy_qty = 0
+        
+        if sell_qty <= 0 or buy_qty <= 0:
+            continue
+        
+        # Use original quantity or available quantity, whichever is smaller
+        original_qty = opp.get('tradeable_qty', 0)
+        if pd.isna(original_qty) or original_qty <= 0:
+            original_qty = min(sell_qty, buy_qty)
+        
+        tradeable_qty = min(original_qty, sell_qty, buy_qty)
+        
+        if tradeable_qty <= 0:
+            continue
+        
+        # Calculate profit/loss (can be negative)
+        profit_per_share = sell_price - buy_price
+        realized_profit = profit_per_share * tradeable_qty
+        
+        total_profit += realized_profit
+    
+    return total_profit
+
+
 class LatencySimulator:
     """
     Simula el efecto de latencia en oportunidades de arbitraje.
