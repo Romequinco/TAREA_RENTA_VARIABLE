@@ -114,41 +114,48 @@ def create_decay_chart(money_table_data: List[Dict], save_path: Optional[str] = 
     # Calculate percentages
     percentages = [(p / max_profit * 100) if max_profit != 0 else 0 for p in profits]
     
-    # Crear figura con dos subplots
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6))
+    # Crear figura con un solo subplot para mostrar (solo linear scale)
+    fig, ax1 = plt.subplots(1, 1, figsize=(10, 6))
     
-    # Plot 1: Log scale (if all profits are positive)
-    if not has_losses and all(p > 0 for p in profits):
-        ax1.semilogy(latencies_ms, profits, 'b-o', linewidth=2, markersize=8)
-        ax1.set_ylabel('Profit (€, log scale)', fontsize=12)
-        ax1.set_title('Profit Decay with Latency (Log Scale)', fontsize=14, fontweight='bold')
-    else:
-        ax1.plot(latencies_ms, profits, 'b-o', linewidth=2, markersize=8)
-        ax1.axhline(y=0, color='r', linestyle='--', linewidth=2, label='Break-even')
-        ax1.set_ylabel('Profit/Loss (€)', fontsize=12)
-        ax1.set_title('Profit Decay with Latency (Linear Scale)', fontsize=14, fontweight='bold')
-        ax1.legend()
-    
+    # Plot 1: Linear scale (siempre mostrar linear scale)
+    ax1.plot(latencies_ms, profits, 'b-o', linewidth=2, markersize=8)
+    ax1.axhline(y=0, color='r', linestyle='--', linewidth=2, label='Break-even')
+    ax1.set_ylabel('Profit/Loss (€)', fontsize=12)
     ax1.set_xlabel('Latency (ms)', fontsize=12)
+    ax1.set_title('Profit Decay with Latency (Linear Scale)', fontsize=14, fontweight='bold')
     ax1.grid(True, alpha=0.3)
-    
-    # Plot 2: Percentage of 0 latency profit
-    ax2.plot(latencies_ms, percentages, 'g-o', linewidth=2, markersize=8)
-    ax2.axhline(y=0, color='r', linestyle='--', linewidth=2, label='Break-even')
-    ax2.axhline(y=100, color='b', linestyle=':', linewidth=1, alpha=0.5, label='100% (0 latency)')
-    ax2.set_xlabel('Latency (ms)', fontsize=12)
-    ax2.set_ylabel('% of Profit at 0 Latency', fontsize=12)
-    ax2.set_title('Profit Decay as % of 0 Latency', fontsize=14, fontweight='bold')
-    ax2.grid(True, alpha=0.3)
-    ax2.legend()
+    ax1.legend()
     
     plt.tight_layout()
     
-    if save_path:
-        plt.savefig(save_path, dpi=300, bbox_inches='tight')
-        print(f"\n  Gráfico guardado en: {save_path}")
-    
+    # Mostrar solo el gráfico linear scale
     plt.show()
+    
+    # Si se proporciona save_path, guardar ambos gráficos en archivos separados
+    if save_path:
+        # Guardar gráfico linear scale
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+        print(f"\n  Gráfico (Linear Scale) guardado en: {save_path}")
+        
+        # Crear y guardar el gráfico de porcentaje (sin mostrarlo)
+        fig2, ax2 = plt.subplots(1, 1, figsize=(10, 6))
+        ax2.plot(latencies_ms, percentages, 'g-o', linewidth=2, markersize=8)
+        ax2.axhline(y=0, color='r', linestyle='--', linewidth=2, label='Break-even')
+        ax2.axhline(y=100, color='g', linestyle=':', linewidth=1, alpha=0.5, label='100% (0 latency)')
+        ax2.set_xlabel('Latency (ms)', fontsize=12)
+        ax2.set_ylabel('% of Profit at 0 Latency', fontsize=12)
+        ax2.set_title('Profit Decay as % of 0 Latency', fontsize=14, fontweight='bold')
+        ax2.grid(True, alpha=0.3)
+        ax2.legend()
+        plt.tight_layout()
+        
+        # Guardar gráfico de porcentaje con nombre modificado
+        import os
+        base_path = os.path.splitext(save_path)[0]
+        percentage_path = f"{base_path}_percentage.png"
+        plt.savefig(percentage_path, dpi=300, bbox_inches='tight')
+        print(f"  Gráfico (Percentage) guardado en: {percentage_path}")
+        plt.close(fig2)  # Cerrar sin mostrar
     
     # Imprimir análisis de decay
     print("\nDecay Analysis:")
