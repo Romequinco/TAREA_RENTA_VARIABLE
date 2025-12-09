@@ -1,9 +1,10 @@
 """
 ================================================================================
-config.py - Configuración Centralizada del Sistema de Arbitraje
+config_module.py - Configuración Centralizada del Sistema de Arbitraje
 ================================================================================
+
 Define todos los parámetros críticos, thresholds, directorios y constantes
-utilizados por los demás módulos.
+utilizados por los demás módulos del sistema de análisis de arbitraje.
 ================================================================================
 """
 
@@ -26,10 +27,14 @@ class Config:
     FIGURES_DIR = OUTPUT_DIR / "figures"
     
     # ========================================================================
+    # EXCHANGES - Lista de exchanges a procesar
+    # ========================================================================
+    EXCHANGES = ["BME", "AQUIS", "CBOE", "TURQUOISE"]
+    
+    # ========================================================================
     # MAGIC NUMBERS - Vendor Data Definitions
     # ========================================================================
     # CRÍTICO: Estos valores NO son precios reales
-    # Fuente: Arbitrage study in BME.docx - Section 2 "CRITICAL"
     MAGIC_NUMBERS = [
         666666.666,  # Unquoted/Unknown
         999999.999,  # Market Order (At Best)
@@ -42,8 +47,16 @@ class Config:
     # ========================================================================
     # MARKET STATUS CODES - Solo Continuous Trading
     # ========================================================================
-    # Fuente: arbitrage_architecture.md - Sección 2.3
-    # NOTA: Se incluyen variantes de códigos MIC encontradas en los datos
+    # Estados de trading continuo válidos por exchange
+    # Mapeo de exchanges a códigos de estado válidos para continuous trading
+    CONTINUOUS_TRADING_STATUS = {
+        'AQUIS': [5308427],
+        'BME': [5832713, 5832756],
+        'CBOE': [12255233],
+        'TURQUOISE': [7608181]
+    }
+    
+    # Compatibilidad con código existente (mapeo de MICs a códigos)
     VALID_STATES = {
         'XMAD': [5832713, 5832756],  # BME (Bolsas y Mercados Españoles)
         'AQXE': [5308427],            # AQUIS Exchange
@@ -54,40 +67,21 @@ class Config:
     }
     
     # ========================================================================
-    # LATENCY BUCKETS (microsegundos)
+    # LATENCY LEVELS (microsegundos)
     # ========================================================================
-    # Fuente: Arbitrage study in BME.docx - Step 4
-    LATENCY_BUCKETS = [
-        0,       # Teórico (instantáneo)
-        100,     # 0.1ms
-        500,     # 0.5ms
-        1000,    # 1ms
-        2000,    # 2ms
-        3000,    # 3ms
-        4000,    # 4ms
-        5000,    # 5ms
-        10000,   # 10ms
-        15000,   # 15ms
-        20000,   # 20ms
-        30000,   # 30ms
-        50000,   # 50ms
-        100000   # 100ms
-    ]
+    # Niveles de latencia para simulación (en microsegundos)
+    LATENCY_LEVELS = [0, 100, 500, 1000, 2000, 3000, 4000, 5000, 10000, 15000, 20000, 30000, 50000, 100000]
     
-    # ========================================================================
-    # TRADING HOURS - Filtros Temporales
-    # ========================================================================
-    # Fuente: arbitrage_architecture.md - Sección 5.3 Edge Cases
-    MARKET_OPEN_WARMUP_SECONDS = 300    # Ignorar primeros 5 minutos
-    MARKET_CLOSE_COOLDOWN_SECONDS = 300 # Ignorar últimos 5 minutos
+    # Compatibilidad con código existente
+    LATENCY_BUCKETS = LATENCY_LEVELS
     
     # ========================================================================
     # THRESHOLDS DE VALIDACIÓN
     # ========================================================================
     MIN_PROFIT_PER_UNIT = 0.0001        # 0.01 céntimos
-    MIN_THEORETICAL_PROFIT = 0.10       # 10 céntimos
-    MAX_REASONABLE_PRICE = 10000        # EUR
-    SUSPICIOUS_PROFIT_THRESHOLD = 1000  # EUR por ISIN
+    MIN_THEORETICAL_PROFIT = 0.10     # 10 céntimos
+    MAX_REASONABLE_PRICE = 10000       # EUR - Precio máximo razonable
+    SUSPICIOUS_PROFIT_THRESHOLD = 1000 # EUR por ISIN
     
     # ========================================================================
     # PERFORMANCE SETTINGS
@@ -96,11 +90,10 @@ class Config:
     N_JOBS = -1          # Usar todos los CPUs disponibles (-1 = auto)
     
     # ========================================================================
-    # BOOK IDENTITY KEY
+    # TRADING HOURS - Filtros Temporales (opcional, no usado ya que se descataloga por código de mercado)
     # ========================================================================
-    # Fuente: arbitrage_architecture.md - Sección 2.1
-    # book_key = (session, isin, mic, ticker)
-    # Esto identifica unívocamente cada order book para joins QTE-STS
+    MARKET_OPEN_WARMUP_SECONDS = 300    # Ignorar primeros 5 minutos
+    MARKET_CLOSE_COOLDOWN_SECONDS = 300 # Ignorar últimos 5 minutos
 
 # ============================================================================
 # Instancia global para importar desde otros módulos
